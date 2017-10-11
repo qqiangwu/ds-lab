@@ -56,7 +56,8 @@ func (fsm *ViewFsm) advance() {
     }
 
     if len(candidates) == 0 {
-        panic("Advance failed: no servers")
+        log.Printf("Advance failed: no servers")
+        fsm.state = EMPTY
     } else {
         primaryCandidate := candidates[0]
         // note: we have to explicitly check the new primary is in the set of old [primary, backup], only check
