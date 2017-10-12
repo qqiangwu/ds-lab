@@ -29,8 +29,9 @@ import "syscall"
 import "sync"
 import "sync/atomic"
 import "fmt"
-import "math/rand"
-
+import (
+    "math/rand"
+)
 
 // px.Status() return values, indicating
 // whether an agreement has been decided,
@@ -53,46 +54,39 @@ type Paxos struct {
     peers      []string
     me         int // index into peers[]
 
-
-    // Your data here.
+    values     map[int]*PaxosFsm
+    min        int32
+    max        int32
+    peerMins       []int32
 }
 
-//
-// call() sends an RPC to the rpcname handler on server srv
-// with arguments args, waits for the reply, and leaves the
-// reply in reply. the reply argument should be a pointer
-// to a reply structure.
-//
-// the return value is true if the server responded, and false
-// if call() was not able to contact the server. in particular,
-// the replys contents are only valid if call() returned true.
-//
-// you should assume that call() will time out and return an
-// error after a while if it does not get a reply from the server.
-//
-// please use call() to send all RPCs, in client.go and server.go.
-// please do not change this function.
-//
-func call(srv string, name string, args interface{}, reply interface{}) bool {
-    c, err := rpc.Dial("unix", srv)
-    if err != nil {
-        err1 := err.(*net.OpError)
-        if err1.Err != syscall.ENOENT && err1.Err != syscall.ECONNREFUSED {
-            fmt.Printf("paxos Dial() failed: %v\n", err1)
-        }
-        return false
-    }
-    defer c.Close()
+func (px *Paxos) getInstance(seq int) *PaxosFsm {
+    px.mu.Lock()
+    defer px.mu.Unlock()
 
-    err = c.Call(name, args, reply)
-    if err == nil {
-        return true
+    fsm, exist := px.values[seq]
+    if exist {
+        return fsm
+    } else {
+        return nil
     }
-
-    fmt.Println(err)
-    return false
 }
 
+func (px *Paxos) createInstance(seq int, value interface{}) *PaxosFsm {
+    px.mu.Lock()
+    defer px.mu.Unlock()
+
+    v, exist := px.values[seq]
+    if exist {
+        return v
+    } else {
+        atomic.StoreInt32(&px.max, int32(maxOf(px.Max(), seq)))
+        fsm := makePaxosFsm(px.me, px.peers, seq, value)
+        px.values[seq] = fsm
+
+        return fsm
+    }
+}
 
 //
 // the application wants paxos to start agreement on
@@ -102,8 +96,20 @@ func call(srv string, name string, args interface{}, reply interface{}) bool {
 // is reached.
 //
 func (px *Paxos) Start(seq int, v interface{}) {
-    // Your code here.
+    if seq < px.Min() {
+        log.Printf("Start(result: tooMin, me: %d, min: %d, max: %d, seq: %d)", px.me, px.Min(), px.Max(), seq)
+    } else if fsm, exists := px.values[seq]; exists {
+        log.Printf("Start(result: exist, me: %d, min: %d, max: %d, seq: %d)", px.me, px.Min(), px.Max(), seq)
+
+        fsm.SubmitValueIfNeeded(v)
+    } else {
+        log.Printf("Start(result: started, me: %d, min: %d, max: %d, seq: %d)", px.me, px.Min(), px.Max(), seq)
+
+        fsm := px.createInstance(seq, v)
+        fsm.Start()
+    }
 }
+
 
 //
 // the application on this machine is done with
@@ -112,7 +118,11 @@ func (px *Paxos) Start(seq int, v interface{}) {
 // see the comments for Min() for more explanation.
 //
 func (px *Paxos) Done(seq int) {
-    // Your code here.
+    px.mu.Lock()
+    defer px.mu.Unlock()
+
+    px.peerMins[px.me] = int32(seq)
+    px.syncMins(nil)
 }
 
 //
@@ -121,8 +131,7 @@ func (px *Paxos) Done(seq int) {
 // this peer.
 //
 func (px *Paxos) Max() int {
-    // Your code here.
-    return 0
+    return int(atomic.LoadInt32(&px.max))
 }
 
 //
@@ -154,10 +163,26 @@ func (px *Paxos) Max() int {
 // instances.
 //
 func (px *Paxos) Min() int {
-    // You code here.
-    return 0
+    return int(atomic.LoadInt32(&px.min)) + 1
 }
 
+func (px* Paxos) syncMins(peerMins []int) {
+    old := px.Min()
+
+    for peer, minV := range peerMins {
+        px.peerMins[peer] = int32(maxOf(int(px.peerMins[peer]), minV))
+    }
+
+    atomic.StoreInt32(&px.min, minElement(px.peerMins))
+
+    if old < px.Min() {
+        log.Printf("PeerMin(me: %d, min: %d, max: %d)", px.me, px.Min(), px.Max())
+
+        for max := px.Min(); old < max; old++ {
+            delete(px.values, old)
+        }
+    }
+}
 //
 // the application wants to know whether this
 // peer thinks an instance has been decided,
@@ -166,11 +191,97 @@ func (px *Paxos) Min() int {
 // it should not contact other Paxos peers.
 //
 func (px *Paxos) Status(seq int) (Fate, interface{}) {
-    // Your code here.
-    return Pending, nil
+    px.mu.Lock()
+    defer px.mu.Unlock()
+
+    if seq < px.Min() {
+        return Forgotten, nil
+    } else {
+        fsm, exist := px.values[seq]
+        if exist {
+            if fsm.IsDone() {
+                return Decided, fsm.GetValue()
+            } else {
+                return Pending, nil
+            }
+        } else {
+            log.Printf("Status(result: notFound, me: %d, seq: %d)", px.me, seq)
+            return Forgotten, nil
+        }
+    }
 }
 
+////
+// PaxosFsm RPC
+func (px *Paxos) Prepare(args *PrepareArgs, reply *PrepareReply) error {
+    log.Printf("> Prepare(me: %d, from: %d, seq: %d, proposal: %d)", px.me, args.Me, args.Seq, args.Proposal)
 
+    reply.Peer = px.me
+    if args.Seq < px.Min() {
+        log.Printf("< Prepare(result: seqTooLess, me: %s, min: %d, seq: %d)", px.me, px.Min(), args.Seq)
+        reply.Accept = false
+    } else {
+        fsm := px.getInstance(args.Seq)
+
+        if fsm == nil {
+            log.Printf("< Prepare(result: newPaxos, me: %d, min: %d, max: %d, seq: %d)",
+                px.me, px.Min(), px.Max(), args.Seq)
+
+            fsm = px.createInstance(args.Seq, nil)
+        }
+
+        fsm.OnPrepare(args, reply)
+    }
+
+    return nil
+}
+
+func (px *Paxos) Accept(args *AcceptArgs, reply *AcceptReply) error {
+    log.Printf("> Accept(me: %d, from: %d, seq: %d, proposal: %d)", px.me, args.Me, args.Seq, args.Proposal)
+
+    px.mu.Lock()
+    reply.Peer = px.me
+    reply.PeerMin = int(px.peerMins[px.me])
+    px.mu.Unlock()
+
+    if args.Seq < px.Min() {
+        log.Printf("< Accept(result: seqTooLess, me: %s, min: %d, seq: %d)", px.me, px.Min(), args.Seq)
+        reply.Accept = false
+    } else {
+        fsm := px.getInstance(args.Seq)
+
+        if fsm == nil {
+            log.Printf("< Prepare(result: newPaxos, me: %d, min: %d, max: %d, seq: %d)",
+                px.me, px.Min(), px.Max(), args.Seq)
+
+            fsm = px.createInstance(args.Seq, nil)
+        }
+
+        fsm.OnAccept(args, reply)
+    }
+
+    return nil
+}
+
+func (px *Paxos) Decide(args *DecideArgs, reply *DecideReply) error {
+    log.Printf("> Decide(me: %d, from: %d, seq: %d, proposal: %d)", px.me, args.Me, args.Seq, args.Proposal)
+
+    px.syncMins(args.PeerMins)
+
+    if args.Seq < px.Min() {
+        log.Printf("< Decide(result: seqTooLess, me: %s, min: %d, seq: %d)", px.me, px.Min(), args.Seq)
+    } else {
+        fsm := px.getInstance(args.Seq)
+
+        if fsm == nil {
+            log.Printf("< Decide(result: notFound, me: %s, seq: %d)", px.me, args.Seq)
+        } else {
+            fsm.OnDecide(args, reply)
+        }
+    }
+
+    return nil
+}
 
 //
 // tell the peer to shut itself down.
@@ -182,6 +293,17 @@ func (px *Paxos) Kill() {
     if px.l != nil {
         px.l.Close()
     }
+}
+
+func (px *Paxos) Finalize() {
+    px.mu.Lock()
+    defer px.mu.Unlock()
+
+    for _, v := range px.values {
+        v.Finalize()
+    }
+
+    px.values = nil
 }
 
 //
@@ -213,9 +335,14 @@ func Make(peers []string, me int, rpcs *rpc.Server) *Paxos {
     px := &Paxos{}
     px.peers = peers
     px.me = me
+    px.values = make(map[int]*PaxosFsm)
+    px.peerMins = make([]int32, len(peers))
+    px.min = -1
+    px.max = -1
 
-
-    // Your initialization code here.
+    for i := range px.peerMins {
+        px.peerMins[i] = -1
+    }
 
     if rpcs != nil {
         // caller will create socket &c
@@ -265,6 +392,8 @@ func Make(peers []string, me int, rpcs *rpc.Server) *Paxos {
                     fmt.Printf("Paxos(%v) accept: %v\n", me, err.Error())
                 }
             }
+
+            px.Finalize()
         }()
     }
 
