@@ -16,8 +16,8 @@ const (
 
 var states = []string { "PROPOSER", "VOTER", "PROPOSED", "DONE" }
 
-const TIMEOUT_MIN = 100
-const TIMEOUT_MAX = 500
+const TIMEOUT_MIN = 1
+const TIMEOUT_MAX = 50
 
 type Acceptor struct {
     maxProposalSeen int
@@ -203,7 +203,7 @@ func (fsm *PaxosFsm) OnTimeout() {
     log.Printf("> OnTimeout(me: %d, seq: %d, state: %s)", fsm.id, fsm.seq, fsm.getState())
 
     if fsm.state != VOTER {
-        log.Panicf("< OnTimeout(result: badState, me: %d, state: %s)", fsm.id, fsm.getState())
+        log.Printf("< OnTimeout(result: badState, me: %d, state: %s)", fsm.id, fsm.getState())
     } else {
         fsm.clearTimer()
         fsm.propose()
