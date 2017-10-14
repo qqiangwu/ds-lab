@@ -4,7 +4,10 @@ import "net/rpc"
 import "crypto/rand"
 import "math/big"
 
-import "fmt"
+import (
+    "fmt"
+    "log"
+)
 
 type Clerk struct {
     servers []string
@@ -65,7 +68,20 @@ func call(srv string, rpcname string,
 // keeps trying forever in the face of all other errors.
 //
 func (ck *Clerk) Get(key string) string {
-    // You will have to modify this function.
+    args := &GetArgs{key}
+    reply := &GetReply{}
+
+    for _, server := range ck.servers {
+        if call(server, "KVPaxos.Get", args, reply) {
+            if reply.Err == OK {
+                return reply.Value
+            } else {
+                return ""
+            }
+        }
+    }
+
+    log.Panicf("ClertGet(result: allDied)")
     return ""
 }
 
@@ -73,7 +89,16 @@ func (ck *Clerk) Get(key string) string {
 // shared by Put and Append.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-    // You will have to modify this function.
+    args := &PutAppendArgs{key, value, op}
+    reply := &PutAppendReply{}
+
+    for _, server := range ck.servers {
+        if call(server, "KVPaxos.PutAppend", args, reply) {
+            return
+        }
+    }
+
+    log.Panicf("ClertPutAppend(result: allDied)")
 }
 
 func (ck *Clerk) Put(key string, value string) {

@@ -122,6 +122,9 @@ func (px *Paxos) Done(seq int) {
     px.mu.Lock()
     defer px.mu.Unlock()
 
+    if int32(seq) < px.peerMins[px.me] {
+        log.Panicf("Done(result: seqTooLess, have: %d, set: %d)", px.peerMins[px.me], seq)
+    }
     px.peerMins[px.me] = int32(seq)
     px.syncMins(nil)
 }
@@ -198,10 +201,7 @@ func (px *Paxos) Status(seq int) (Fate, interface{}) {
         fsm := px.getInstance(seq)
 
         if fsm == nil {
-            log.Printf("< Status(result: newPaxos, me: %d, min: %d, max: %d, seq: %d)",
-                px.me, px.Min(), px.Max(), seq)
-
-            fsm = px.createInstance(seq, nil)
+            return Forgotten, nil
         }
 
         if fsm.IsDone() {
