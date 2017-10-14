@@ -102,6 +102,7 @@ func (px *Paxos) Start(seq int, v interface{}) {
         log.Printf("Start(result: exist, me: %d, min: %d, max: %d, seq: %d)", px.me, px.Min(), px.Max(), seq)
 
         fsm.SubmitValueIfNeeded(v)
+        fsm.Start()
     } else {
         log.Printf("Start(result: started, me: %d, min: %d, max: %d, seq: %d)", px.me, px.Min(), px.Max(), seq)
 
@@ -191,22 +192,22 @@ func (px* Paxos) syncMins(peerMins []int) {
 // it should not contact other Paxos peers.
 //
 func (px *Paxos) Status(seq int) (Fate, interface{}) {
-    px.mu.Lock()
-    defer px.mu.Unlock()
-
     if seq < px.Min() {
         return Forgotten, nil
     } else {
-        fsm, exist := px.values[seq]
-        if exist {
-            if fsm.IsDone() {
-                return Decided, fsm.GetValue()
-            } else {
-                return Pending, nil
-            }
+        fsm := px.getInstance(seq)
+
+        if fsm == nil {
+            log.Printf("< Status(result: newPaxos, me: %d, min: %d, max: %d, seq: %d)",
+                px.me, px.Min(), px.Max(), seq)
+
+            fsm = px.createInstance(seq, nil)
+        }
+
+        if fsm.IsDone() {
+            return Decided, fsm.GetValue()
         } else {
-            log.Printf("Status(result: notFound, me: %d, seq: %d)", px.me, seq)
-            return Forgotten, nil
+            return Pending, nil
         }
     }
 }
@@ -214,17 +215,15 @@ func (px *Paxos) Status(seq int) (Fate, interface{}) {
 ////
 // PaxosFsm RPC
 func (px *Paxos) Prepare(args *PrepareArgs, reply *PrepareReply) error {
-    log.Printf("> Prepare(me: %d, from: %d, seq: %d, proposal: %d)", px.me, args.Me, args.Seq, args.Proposal)
-
     reply.Peer = px.me
     if args.Seq < px.Min() {
-        log.Printf("< Prepare(result: seqTooLess, me: %s, min: %d, seq: %d)", px.me, px.Min(), args.Seq)
+        log.Printf("Prepare(result: seqTooLess, me: %s, min: %d, seq: %d)", px.me, px.Min(), args.Seq)
         reply.Accept = false
     } else {
         fsm := px.getInstance(args.Seq)
 
         if fsm == nil {
-            log.Printf("< Prepare(result: newPaxos, me: %d, min: %d, max: %d, seq: %d)",
+            log.Printf("Prepare(result: newPaxos, me: %d, min: %d, max: %d, seq: %d)",
                 px.me, px.Min(), px.Max(), args.Seq)
 
             fsm = px.createInstance(args.Seq, nil)
@@ -237,21 +236,19 @@ func (px *Paxos) Prepare(args *PrepareArgs, reply *PrepareReply) error {
 }
 
 func (px *Paxos) Accept(args *AcceptArgs, reply *AcceptReply) error {
-    log.Printf("> Accept(me: %d, from: %d, seq: %d, proposal: %d)", px.me, args.Me, args.Seq, args.Proposal)
-
     px.mu.Lock()
     reply.Peer = px.me
     reply.PeerMin = int(px.peerMins[px.me])
     px.mu.Unlock()
 
     if args.Seq < px.Min() {
-        log.Printf("< Accept(result: seqTooLess, me: %s, min: %d, seq: %d)", px.me, px.Min(), args.Seq)
+        log.Printf("Accept(result: seqTooLess, me: %s, min: %d, seq: %d)", px.me, px.Min(), args.Seq)
         reply.Accept = false
     } else {
         fsm := px.getInstance(args.Seq)
 
         if fsm == nil {
-            log.Printf("< Prepare(result: newPaxos, me: %d, min: %d, max: %d, seq: %d)",
+            log.Printf("Accept(result: newPaxos, me: %d, min: %d, max: %d, seq: %d)",
                 px.me, px.Min(), px.Max(), args.Seq)
 
             fsm = px.createInstance(args.Seq, nil)
@@ -264,20 +261,21 @@ func (px *Paxos) Accept(args *AcceptArgs, reply *AcceptReply) error {
 }
 
 func (px *Paxos) Decide(args *DecideArgs, reply *DecideReply) error {
-    log.Printf("> Decide(me: %d, from: %d, seq: %d, proposal: %d)", px.me, args.Me, args.Seq, args.Proposal)
-
     px.syncMins(args.PeerMins)
 
     if args.Seq < px.Min() {
-        log.Printf("< Decide(result: seqTooLess, me: %s, min: %d, seq: %d)", px.me, px.Min(), args.Seq)
+        log.Printf("Decide(result: seqTooLess, me: %s, min: %d, seq: %d)", px.me, px.Min(), args.Seq)
     } else {
         fsm := px.getInstance(args.Seq)
 
         if fsm == nil {
-            log.Printf("< Decide(result: notFound, me: %s, seq: %d)", px.me, args.Seq)
-        } else {
-            fsm.OnDecide(args, reply)
+            log.Printf("Decide(result: newPaxos, me: %d, min: %d, max: %d, seq: %d)",
+                px.me, px.Min(), px.Max(), args.Seq)
+
+            fsm = px.createInstance(args.Seq, nil)
         }
+
+        fsm.OnDecide(args, reply)
     }
 
     return nil

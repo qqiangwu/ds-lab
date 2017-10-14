@@ -16,7 +16,7 @@ const (
 
 var states = []string { "PROPOSER", "VOTER", "PROPOSED", "DONE" }
 
-const TIMEOUT_MIN = 1
+const TIMEOUT_MIN = 10
 const TIMEOUT_MAX = 50
 
 type Acceptor struct {
@@ -72,6 +72,9 @@ func makePaxosFsm(id int, peers []string, seq int, value interface{}) *PaxosFsm 
     }
 
     result.timeout = time.Duration(rand.Intn(TIMEOUT_MAX - TIMEOUT_MIN) + TIMEOUT_MIN) * time.Millisecond
+
+    // FIXME: to make test deaf pass, we cannot start a voter with a timer
+    // result.becomeVoter()
 
     return result
 }
@@ -149,10 +152,8 @@ func (fsm *PaxosFsm) OnPrepare(args *PrepareArgs, reply *PrepareReply) {
     fsm.mu.Lock()
     defer fsm.mu.Unlock()
 
-    log.Printf("> OnPrepare(me: %d, seq: %d, state: %s)", fsm.id, fsm.seq, fsm.getState())
-
     if args.Proposal <= fsm.acceptor.maxProposalSeen {
-        log.Printf("< OnPrepare(result: reject, me: %d, seq: %d, proposalSeen: %d, proposalNew: %d)",
+        log.Printf("OnPrepare(result: reject, me: %d, seq: %d, proposalSeen: %d, proposalNew: %d)",
                 fsm.id, fsm.seq, fsm.acceptor.maxProposalSeen, args.Proposal)
         reply.Accept = false
         reply.MaxProposal = fsm.acceptor.maxProposalSeen
@@ -193,22 +194,19 @@ func (fsm *PaxosFsm) OnPrepare(args *PrepareArgs, reply *PrepareReply) {
         panic("Bad paxos state")
     }
 
-    log.Printf("< OnPrepare(me: %d, seq: %d, state: %s, accepted: %t)", fsm.id, fsm.seq, fsm.getState(), reply.Accept)
+    log.Printf("OnPrepare(me: %d, seq: %d, state: %s, accepted: %t)", fsm.id, fsm.seq, fsm.getState(), reply.Accept)
 }
 
 func (fsm *PaxosFsm) OnTimeout() {
     fsm.mu.Lock()
     defer fsm.mu.Unlock()
 
-    log.Printf("> OnTimeout(me: %d, seq: %d, state: %s)", fsm.id, fsm.seq, fsm.getState())
-
     if fsm.state != VOTER {
-        log.Printf("< OnTimeout(result: badState, me: %d, state: %s)", fsm.id, fsm.getState())
+        log.Printf("OnTimeout(result: badState, me: %d, state: %s)", fsm.id, fsm.getState())
     } else {
-        fsm.clearTimer()
         fsm.propose()
 
-        log.Printf("< OnTimeout(result: toProposer, me: %d, state: %s, proposalMax: %d)",
+        log.Printf("OnTimeout(result: toProposer, me: %d, state: %s, proposalMax: %d)",
             fsm.id, fsm.getState(), fsm.acceptor.maxProposalSeen)
     }
 }
@@ -217,15 +215,13 @@ func (fsm *PaxosFsm) OnPrepareOK(proposal int, reply *PrepareReply) {
     fsm.mu.Lock()
     defer fsm.mu.Unlock()
 
-    log.Printf("> OnPrepareOK(me: %d, peer: %d, seq: %d, state: %s)", fsm.id, reply.Peer, fsm.seq, fsm.getState())
-
     fsm.proposer.seen = maxOf(fsm.proposer.seen, proposal)
     if proposal < fsm.proposer.proposal {
-        log.Printf("< OnPrepareOK(result: invalidProposal, me: %d, get: %d, wait: %d)",
+        log.Printf("OnPrepareOK(result: legacy, me: %d, get: %d, wait: %d)",
             fsm.id, proposal, fsm.proposer.proposal)
     } else {
         if fsm.state != PROPOSER {
-            log.Printf("< OnPrepareOK(result: legacy, me: %d, proposal: %d, state: %s)",
+            log.Printf("OnPrepareOK(result: ignore, me: %d, proposal: %d, state: %s)",
                 fsm.id, fsm.proposer.proposal, fsm.getState())
             return
         }
@@ -238,7 +234,7 @@ func (fsm *PaxosFsm) OnPrepareOK(proposal int, reply *PrepareReply) {
         }
 
         if fsm.proposer.numAck * 2 > len(fsm.peers) {
-            log.Printf("< OnPrepareOK(result: majority, me: %d, proposal: %d)", fsm.id, proposal)
+            log.Printf("OnPrepareOK(result: majority, me: %d, proposal: %d)", fsm.id, proposal)
 
             req := AcceptArgs{fsm.id, fsm.proposer.proposal, fsm.proposer.maxValue, fsm.seq}
 
@@ -275,21 +271,19 @@ func (fsm *PaxosFsm) OnPrepareRejected(proposal int, reply *PrepareReply) {
     fsm.mu.Lock()
     defer fsm.mu.Unlock()
 
-    log.Printf("> OnPrepareRejected(me: %d, peer: %d, seq: %d, state: %s)", fsm.id, reply.Peer, fsm.seq, fsm.getState())
-
     fsm.proposer.seen = maxOf(fsm.proposer.seen, reply.MaxProposal)
 
     if proposal < fsm.proposer.proposal {
-        log.Printf("< OnPrepareRejected(result: invalidProposal, me: %d, get: %d, wait: %d)",
+        log.Printf("OnPrepareRejected(result: invalidProposal, me: %d, get: %d, wait: %d)",
             fsm.id, proposal, fsm.proposer.proposal)
     } else {
         if reply.Decided {
-            log.Printf("< OnPrepareRejected(result: decided, me: %d, seq: %d)", fsm.id, fsm.seq)
+            log.Printf("OnPrepareRejected(result: decided, me: %d, seq: %d)", fsm.id, fsm.seq)
             fsm.decide(proposal, reply.MaxValue)
             return
         }
         if fsm.state != PROPOSER {
-            log.Printf("< OnPrepareRejected(result: ignore, me: %d, proposal: %d, state: %s)",
+            log.Printf("OnPrepareRejected(result: ignore, me: %d, proposal: %d, state: %s)",
                 fsm.id, fsm.proposer.proposal, fsm.getState())
             return
         }
@@ -297,7 +291,7 @@ func (fsm *PaxosFsm) OnPrepareRejected(proposal int, reply *PrepareReply) {
         fsm.proposer.numNack++
 
         if fsm.proposer.numNack * 2 > len(fsm.peers) {
-            log.Printf("< OnPrepareRejected(result: majority, me: %d, proposal: %d)", fsm.id, proposal)
+            log.Printf("OnPrepareRejected(result: majority, me: %d, proposal: %d)", fsm.id, proposal)
 
             fsm.becomeVoter()
         }
@@ -308,14 +302,12 @@ func (fsm *PaxosFsm) OnPrepareFailed(proposal int) {
     fsm.mu.Lock()
     defer fsm.mu.Unlock()
 
-    log.Printf("> OnPrepareFailed(me: %d, proposal: %d, seq: %d, state: %s)", fsm.id, proposal, fsm.seq, fsm.getState())
-
     if proposal < fsm.proposer.proposal {
-        log.Printf("< OnPrepareFailed(result: invalidProposal, me: %d, get: %d, wait: %d)",
+        log.Printf("OnPrepareFailed(result: legacy, me: %d, get: %d, wait: %d)",
             fsm.id, proposal, fsm.proposer.proposal)
     } else {
         if fsm.state != PROPOSER {
-            log.Printf("< OnPrepareFailed(result: ignore, me: %d, proposal: %d, state: %s)",
+            log.Printf("OnPrepareFailed(result: ignore, me: %d, proposal: %d, state: %s)",
                 fsm.id, fsm.proposer.proposal, fsm.getState())
             return
         }
@@ -323,7 +315,7 @@ func (fsm *PaxosFsm) OnPrepareFailed(proposal int) {
         fsm.proposer.numNack++
 
         if fsm.proposer.numNack * 2 > len(fsm.peers) {
-            log.Printf("< OnPrepareFailed(result: majority, me: %d, proposal: %d)", fsm.id, proposal)
+            log.Printf("OnPrepareFailed(result: majority, me: %d, proposal: %d)", fsm.id, proposal)
 
             fsm.becomeVoter()
         }
@@ -334,7 +326,7 @@ func (fsm *PaxosFsm) OnAccept(args *AcceptArgs, reply *AcceptReply) {
     fsm.mu.Lock()
     defer fsm.mu.Unlock()
 
-    log.Printf("> OnAccept(me: %d, seq: %d, state: %s)", fsm.id, fsm.seq, fsm.getState())
+    log.Printf("OnAccept(me: %d, seq: %d, state: %s)", fsm.id, fsm.seq, fsm.getState())
 
     if args.Proposal >= fsm.acceptor.maxProposalSeen {
         reply.Accept = true
@@ -369,10 +361,8 @@ func (fsm *PaxosFsm) OnAcceptOK(proposal int, peer int) {
     fsm.mu.Lock()
     defer fsm.mu.Unlock()
 
-    log.Printf("> OnAcceptOK(me: %d, peer: %d, seq: %d, state: %s)", fsm.id, peer, fsm.seq, fsm.getState())
-
     if proposal < fsm.proposer.proposal {
-        log.Printf("< OnAcceptOK(result: legacy, me: %d, state: %s)", fsm.id, fsm.getState())
+        log.Printf("OnAcceptOK(result: legacy, me: %d, state: %s)", fsm.id, fsm.getState())
     } else if proposal > fsm.proposer.proposal {
         panic("Impossible: bad accept proposal")
     } else {
@@ -385,13 +375,13 @@ func (fsm *PaxosFsm) OnAcceptOK(proposal int, peer int) {
             }
 
         case DONE:
-            log.Printf("< OnAcceptOK(result: legacy, me: %d, peer: %d, state: %s)", fsm.id, peer, fsm.getState())
+            log.Printf("OnAcceptOK(result: legacy, me: %d, peer: %d, state: %s)", fsm.id, peer, fsm.getState())
 
         case VOTER:
-            log.Printf("< OnAcceptOK(result: ignore, me: %d, peer: %d, state: %s)", fsm.id, peer, fsm.getState())
+            log.Printf("OnAcceptOK(result: ignore, me: %d, peer: %d, state: %s)", fsm.id, peer, fsm.getState())
 
         default:
-            log.Panicf("< OnAcceptOK(result: badState, me: %d, peer: %d, state: %s)", fsm.id, peer, fsm.getState())
+            log.Panicf("OnAcceptOK(result: badState, me: %d, peer: %d, state: %s)", fsm.id, peer, fsm.getState())
         }
     }
 }
@@ -400,10 +390,8 @@ func (fsm *PaxosFsm) OnAcceptRejected(proposal int, peer int) {
     fsm.mu.Lock()
     defer fsm.mu.Unlock()
 
-    log.Printf("> OnAcceptRejected(me: %d, peer: %d, seq: %d, state: %s)", fsm.id, peer, fsm.seq, fsm.getState())
-
     if proposal < fsm.proposer.proposal {
-        log.Printf("< OnAcceptRejected(result: legacy, me: %d, state: %s)", fsm.id, fsm.getState())
+        log.Printf("OnAcceptRejected(result: legacy, me: %d, state: %s)", fsm.id, fsm.getState())
     } else if proposal > fsm.proposer.proposal {
         panic("Impossible: bad accept value")
     } else {
@@ -412,17 +400,18 @@ func (fsm *PaxosFsm) OnAcceptRejected(proposal int, peer int) {
             fsm.proposer.numNack++
 
             if fsm.proposer.numNack * 2 > len(fsm.peers) {
+                log.Printf("OnAcceptRejected(result: majority, me: %d, seq: %d, proposal: %d)", fsm.id, fsm.seq, proposal)
                 fsm.becomeVoter()
             }
 
         case DONE:
-            log.Printf("< OnAcceptRejected(result: legacy, me: %d, peer: %d, state: %s)", fsm.id, peer, fsm.getState())
+            log.Printf("OnAcceptRejected(result: legacy, me: %d, peer: %d, state: %s)", fsm.id, peer, fsm.getState())
 
         case VOTER:
-            log.Printf("< OnAcceptRejected(result: ignore, peer: %d, me: %d, state: %s)", fsm.id, peer, fsm.getState())
+            log.Printf("OnAcceptRejected(result: ignore, peer: %d, me: %d, state: %s)", fsm.id, peer, fsm.getState())
 
         default:
-            log.Panicf("< OnAcceptRejected(result: badState, me: %d, state: %s)", fsm.id, fsm.getState())
+            log.Panicf("OnAcceptRejected(result: badState, me: %d, state: %s)", fsm.id, fsm.getState())
         }
     }
 }
@@ -431,10 +420,8 @@ func (fsm *PaxosFsm) OnAcceptFailed(proposal int) {
     fsm.mu.Lock()
     defer fsm.mu.Unlock()
 
-    log.Printf("> OnAcceptFailed(me: %d, proposal: %d, seq: %d, state: %s)", fsm.id, proposal, fsm.seq, fsm.getState())
-
     if proposal < fsm.proposer.proposal {
-        log.Printf("< OnAcceptFailed(result: legacy, me: %d, state: %s)", fsm.id, fsm.getState())
+        log.Printf("OnAcceptFailed(result: legacy, me: %d, state: %s)", fsm.id, fsm.getState())
     } else if proposal > fsm.proposer.proposal {
         panic("Impossible: bad accept value")
     } else {
@@ -443,17 +430,18 @@ func (fsm *PaxosFsm) OnAcceptFailed(proposal int) {
             fsm.proposer.numNack++
 
             if fsm.proposer.numNack * 2 > len(fsm.peers) {
+                log.Printf("OnAcceptFailed(result: majority, me: %d, seq: %d, proposal: %d)", fsm.id, fsm.seq, proposal)
                 fsm.becomeVoter()
             }
 
         case DONE:
-            log.Printf("< OnAcceptFailed(result: legacy, me: %d, state: %s)", fsm.id, fsm.getState())
+            log.Printf("OnAcceptFailed(result: legacy, me: %d, state: %s)", fsm.id, fsm.getState())
 
         case VOTER:
-            log.Printf("< OnAcceptFailed(result: ignore, me: %d, state: %s)", fsm.id, fsm.getState())
+            log.Printf("OnAcceptFailed(result: ignore, me: %d, state: %s)", fsm.id, fsm.getState())
 
         default:
-            log.Panicf("< OnAcceptFailed(result: badState, me: %d, state: %s)", fsm.id, fsm.getState())
+            log.Panicf("OnAcceptFailed(result: badState, me: %d, state: %s)", fsm.id, fsm.getState())
         }
     }
 }
@@ -475,6 +463,8 @@ func (fsm *PaxosFsm) clearTimer() {
 }
 
 func (fsm *PaxosFsm) propose() {
+    fsm.clearTimer()
+
     fsm.state = PROPOSER
     fsm.proposer.proposal = fsm.proposer.seen + 1
     fsm.proposer.numAck = 0
@@ -511,11 +501,18 @@ func (fsm *PaxosFsm) Start() {
     fsm.mu.Lock()
     defer fsm.mu.Unlock()
 
-    log.Printf("> PaxosStart(me: %d, seq: %d, state: %s)", fsm.id, fsm.seq, fsm.getState())
+    log.Printf("PaxosStart(me: %d, seq: %d)", fsm.id, fsm.seq)
 
     fsm.propose()
+}
 
-    log.Printf("< PaxosStart(me: %d, seq: %d, state: %s)", fsm.id, fsm.seq, fsm.getState())
+func (fsm *PaxosFsm) SubmitValueIfNeeded(v interface{}) {
+    fsm.mu.Lock()
+    defer fsm.mu.Unlock()
+
+    if fsm.acceptor.maxValueAccepted == nil {
+        fsm.acceptor.maxValueAccepted = v
+    }
 }
 
 func (fsm* PaxosFsm) Finalize() {
@@ -535,13 +532,4 @@ func (fsm *PaxosFsm) GetValue() interface{} {
     defer fsm.mu.Unlock()
 
     return fsm.acceptor.maxValueAccepted
-}
-
-func (fsm *PaxosFsm) SubmitValueIfNeeded(v interface{}) {
-    fsm.mu.Lock()
-    defer fsm.mu.Unlock()
-
-    if fsm.acceptor.maxValueAccepted == nil {
-        fsm.acceptor.maxValueAccepted = v
-    }
 }

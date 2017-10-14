@@ -198,14 +198,15 @@ func TestDeaf(t *testing.T) {
     waitmajority(t, pxa, 1)
     time.Sleep(1 * time.Second)
     if ndecided(t, pxa, 1) != npaxos-2 {
-        t.Fatalf("a deaf peer heard about a decision")
+        t.Fatalf("123: a deaf peer heard about a decision")
     }
 
+    // FIXME: even through 0 is deaf, start a propose will make it know the final value
     pxa[0].Start(1, "xxx")
     waitn(t, pxa, 1, npaxos-1)
     time.Sleep(1 * time.Second)
     if ndecided(t, pxa, 1) != npaxos-1 {
-        t.Fatalf("a deaf peer heard about a decision")
+        t.Fatalf("0123: a deaf peer heard about a decision")
     }
 
     pxa[npaxos-1].Start(1, "yyy")
