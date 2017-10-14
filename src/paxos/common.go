@@ -66,43 +66,39 @@ func maxOf(a int, b int) int {
     }
 }
 
-type PrepareArgs struct {
-    Me  int
-    Seq int
-    Proposal int
+func maxOfInt32(a int32, b int32) int32 {
+    if a < b {
+        return b
+    } else {
+        return a
+    }
 }
 
-type PrepareReply struct {
-    Accept  bool
+type MessageType int
+
+const (
+    PREPARE MessageType = iota
+    PREPARE_OK
+    PREPARE_REJECT
+    ACCEPT
+    ACCEPT_OK
+    ACCEPT_REJECT
+    DECIDE
+)
+
+var types = []string { "PREPARE", "PREPARE_OK", "PREPARE_REJECT", "ACCEPT", "ACCEPT_OK", "ACCEPT_REJECT", "DECIDE" }
+
+type PaxosMessage struct {
+    Type        MessageType
+    Proposal    int
     MaxProposal int
     MaxValue    interface{}
-    Peer    int
-    Decided bool
+    Seq         int
+    Sender      int
+    SenderMin   int32
+    MinValues   []int32
 }
 
-type AcceptArgs struct {
-    Me       int
-    Proposal int
-    Value    interface{}
-    Seq      int
+func (p *PaxosMessage) typeStr() string {
+    return types[p.Type]
 }
-
-type AcceptReply struct {
-    Accept   bool
-    Peer     int
-    PeerMin      int
-}
-
-type DecideArgs struct {
-    Me       int
-    Proposal int
-    Value interface{}
-    Seq      int
-    PeerMins []int
-}
-
-type DecideReply struct {
-
-}
-
-

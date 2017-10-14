@@ -54,13 +54,13 @@ type Paxos struct {
     peers      []string
     me         int // index into peers[]
 
-    values     map[int]*PaxosFsm
+    values     map[int]*PaxosInstance
     min        int32
     max        int32
     peerMins       []int32
 }
 
-func (px *Paxos) getInstance(seq int) *PaxosFsm {
+func (px *Paxos) getInstance(seq int) *PaxosInstance {
     px.mu.Lock()
     defer px.mu.Unlock()
 
@@ -72,7 +72,7 @@ func (px *Paxos) getInstance(seq int) *PaxosFsm {
     }
 }
 
-func (px *Paxos) createInstance(seq int, value interface{}) *PaxosFsm {
+func (px *Paxos) createInstance(seq int, value interface{}) *PaxosInstance {
     px.mu.Lock()
     defer px.mu.Unlock()
 
@@ -81,7 +81,7 @@ func (px *Paxos) createInstance(seq int, value interface{}) *PaxosFsm {
         return v
     } else {
         atomic.StoreInt32(&px.max, int32(maxOf(px.Max(), seq)))
-        fsm := makePaxosFsm(px.me, px.peers, seq, value)
+        fsm := makeInstance(px.me, px.peers, seq, px.peerMins[px.me])
         px.values[seq] = fsm
 
         return fsm
@@ -101,12 +101,12 @@ func (px *Paxos) Start(seq int, v interface{}) {
     } else if fsm, exists := px.values[seq]; exists {
         log.Printf("Start(result: exist, me: %d, min: %d, max: %d, seq: %d)", px.me, px.Min(), px.Max(), seq)
 
-        fsm.SubmitValueIfNeeded(v)
+        fsm.Start(v)
     } else {
         log.Printf("Start(result: started, me: %d, min: %d, max: %d, seq: %d)", px.me, px.Min(), px.Max(), seq)
 
         fsm := px.createInstance(seq, v)
-        fsm.Start()
+        fsm.Start(v)
     }
 }
 
@@ -166,11 +166,11 @@ func (px *Paxos) Min() int {
     return int(atomic.LoadInt32(&px.min)) + 1
 }
 
-func (px* Paxos) syncMins(peerMins []int) {
+func (px* Paxos) syncMins(peerMins []int32) {
     old := px.Min()
 
     for peer, minV := range peerMins {
-        px.peerMins[peer] = int32(maxOf(int(px.peerMins[peer]), minV))
+        px.peerMins[peer] = maxOfInt32(px.peerMins[peer], minV)
     }
 
     atomic.StoreInt32(&px.min, minElement(px.peerMins))
@@ -179,7 +179,11 @@ func (px* Paxos) syncMins(peerMins []int) {
         log.Printf("PeerMin(me: %d, min: %d, max: %d)", px.me, px.Min(), px.Max())
 
         for max := px.Min(); old < max; old++ {
-            delete(px.values, old)
+            fsm, ok := px.values[old]
+            if ok {
+                fsm.Stop()
+                delete(px.values, old)
+            }
         }
     }
 }
@@ -199,8 +203,9 @@ func (px *Paxos) Status(seq int) (Fate, interface{}) {
     } else {
         fsm, exist := px.values[seq]
         if exist {
-            if fsm.IsDone() {
-                return Decided, fsm.GetValue()
+            value, done := fsm.GetValue()
+            if done {
+                return Decided, value
             } else {
                 return Pending, nil
             }
@@ -212,14 +217,14 @@ func (px *Paxos) Status(seq int) (Fate, interface{}) {
 }
 
 ////
-// PaxosFsm RPC
-func (px *Paxos) Prepare(args *PrepareArgs, reply *PrepareReply) error {
-    log.Printf("> Prepare(me: %d, from: %d, seq: %d, proposal: %d)", px.me, args.Me, args.Seq, args.Proposal)
+// PaxosInstance RPC
+func (px *Paxos) Prepare(args *PaxosMessage, reply *PaxosMessage) error {
+    log.Printf("> Prepare(me: %d, from: %d, seq: %d, proposal: %d)", px.me, args.Sender, args.Seq, args.Proposal)
 
-    reply.Peer = px.me
+    reply.Sender = px.me
     if args.Seq < px.Min() {
         log.Printf("< Prepare(result: seqTooLess, me: %s, min: %d, seq: %d)", px.me, px.Min(), args.Seq)
-        reply.Accept = false
+        reply.Type = PREPARE_REJECT
     } else {
         fsm := px.getInstance(args.Seq)
 
@@ -230,23 +235,23 @@ func (px *Paxos) Prepare(args *PrepareArgs, reply *PrepareReply) error {
             fsm = px.createInstance(args.Seq, nil)
         }
 
-        fsm.OnPrepare(args, reply)
+        fsm.OnMessage(args, reply)
     }
 
     return nil
 }
 
-func (px *Paxos) Accept(args *AcceptArgs, reply *AcceptReply) error {
-    log.Printf("> Accept(me: %d, from: %d, seq: %d, proposal: %d)", px.me, args.Me, args.Seq, args.Proposal)
+func (px *Paxos) Accept(args *PaxosMessage, reply *PaxosMessage) error {
+    log.Printf("> Accept(me: %d, from: %d, seq: %d, proposal: %d)", px.me, args.Sender, args.Seq, args.Proposal)
 
     px.mu.Lock()
-    reply.Peer = px.me
-    reply.PeerMin = int(px.peerMins[px.me])
+    reply.Sender = px.me
+    reply.SenderMin = px.peerMins[px.me]
     px.mu.Unlock()
 
     if args.Seq < px.Min() {
         log.Printf("< Accept(result: seqTooLess, me: %s, min: %d, seq: %d)", px.me, px.Min(), args.Seq)
-        reply.Accept = false
+        reply.Type = ACCEPT_REJECT
     } else {
         fsm := px.getInstance(args.Seq)
 
@@ -257,16 +262,16 @@ func (px *Paxos) Accept(args *AcceptArgs, reply *AcceptReply) error {
             fsm = px.createInstance(args.Seq, nil)
         }
 
-        fsm.OnAccept(args, reply)
+        fsm.OnMessage(args, reply)
     }
 
     return nil
 }
 
-func (px *Paxos) Decide(args *DecideArgs, reply *DecideReply) error {
-    log.Printf("> Decide(me: %d, from: %d, seq: %d, proposal: %d)", px.me, args.Me, args.Seq, args.Proposal)
+func (px *Paxos) Decide(args *PaxosMessage, reply *PaxosMessage) error {
+    log.Printf("> Decide(me: %d, from: %d, seq: %d, proposal: %d)", px.me, args.Sender, args.Seq, args.Proposal)
 
-    px.syncMins(args.PeerMins)
+    px.syncMins(args.MinValues)
 
     if args.Seq < px.Min() {
         log.Printf("< Decide(result: seqTooLess, me: %s, min: %d, seq: %d)", px.me, px.Min(), args.Seq)
@@ -276,7 +281,7 @@ func (px *Paxos) Decide(args *DecideArgs, reply *DecideReply) error {
         if fsm == nil {
             log.Printf("< Decide(result: notFound, me: %s, seq: %d)", px.me, args.Seq)
         } else {
-            fsm.OnDecide(args, reply)
+            fsm.OnMessage(args, reply)
         }
     }
 
@@ -300,7 +305,7 @@ func (px *Paxos) Finalize() {
     defer px.mu.Unlock()
 
     for _, v := range px.values {
-        v.Finalize()
+        v.Stop()
     }
 
     px.values = nil
@@ -335,7 +340,7 @@ func Make(peers []string, me int, rpcs *rpc.Server) *Paxos {
     px := &Paxos{}
     px.peers = peers
     px.me = me
-    px.values = make(map[int]*PaxosFsm)
+    px.values = make(map[int]*PaxosInstance)
     px.peerMins = make([]int32, len(peers))
     px.min = -1
     px.max = -1
