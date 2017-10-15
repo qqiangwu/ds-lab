@@ -4,8 +4,8 @@ package shardmaster
 // Master shard server: assigns shards to replication groups.
 //
 // RPC interface:
-// Join(servers) -- add a set of groups (gid -> server-list mapping).
-// Leave(gids) -- delete a set of groups.
+// Join(gid, servers) -- replica group gid is joining, give it some shards.
+// Leave(gid) -- replica group gid is retiring, hand off all its shards.
 // Move(shard, gid) -- hand off one shard from current owner to gid.
 // Query(num) -> fetch Config # num, or latest config if num==-1.
 //
@@ -17,52 +17,38 @@ package shardmaster
 // A GID is a replica group ID. GIDs must be uniqe and > 0.
 // Once a GID joins, and leaves, it should never join again.
 //
-// You will need to add fields to the RPC arguments.
+// Please don't change this file.
 //
 
-// The number of shards.
 const NShards = 10
 
-// A configuration -- an assignment of shards to groups.
-// Please don't change this.
 type Config struct {
-	Num    int              // config number
-	Shards [NShards]int     // shard -> gid
-	Groups map[int][]string // gid -> servers[]
+	Num    int                // config number
+	Shards [NShards]int64     // shard -> gid
+	Groups map[int64][]string // gid -> servers[]
 }
 
-const (
-	OK = "OK"
-)
-
-type Err string
-
 type JoinArgs struct {
-	Servers map[int][]string // new GID -> servers mappings
+	GID     int64    // unique replica group ID
+	Servers []string // group server ports
 }
 
 type JoinReply struct {
-	WrongLeader bool
-	Err         Err
 }
 
 type LeaveArgs struct {
-	GIDs []int
+	GID int64
 }
 
 type LeaveReply struct {
-	WrongLeader bool
-	Err         Err
 }
 
 type MoveArgs struct {
 	Shard int
-	GID   int
+	GID   int64
 }
 
 type MoveReply struct {
-	WrongLeader bool
-	Err         Err
 }
 
 type QueryArgs struct {
@@ -70,7 +56,5 @@ type QueryArgs struct {
 }
 
 type QueryReply struct {
-	WrongLeader bool
-	Err         Err
-	Config      Config
+	Config Config
 }
