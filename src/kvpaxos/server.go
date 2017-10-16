@@ -15,14 +15,24 @@ import (
     "time"
 )
 
+// 错误模型：
+// nodes: client不会失效/server不会crash
+// network: 会出现partition，同时，发送的请求会出现收不到响应，且在请求执行前就返回了，对应现实情况: 服务器慢，客户端超时，重试，然后服务器又开始执行了
+//
+// 问题1:ck给m0发送请求，请求还没有执行，又给m1发送了请求，m1执行完成后，又执行了一下一个操作，此时，m0上的操作又开始执行，造成1,2,1的执行
+// 问题2:ck waitFailed，可能是它获取一个commitId后，在等待结果时，另一个ck get获取了一个新的commitId，并且执行完成，然后apply了
 
-const Debug = 0
+var Debug = 0
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
     if Debug > 0 {
         log.Printf(format, a...)
     }
     return
+}
+
+func SetLogLevel(level int) {
+    Debug = level
 }
 
 type OpType int
@@ -37,11 +47,49 @@ type Op struct {
     Key     string
     Value   string
     Sender  int
-    LocalId uint64
+    Offset  uint64
+    Clerk   int64
+    Id      int64
 }
 
 func equals(a *Op, b *Op) bool {
-    return a.Sender == b.Sender && a.LocalId == b.LocalId
+    return a.Sender == b.Sender && a.Offset == b.Offset
+}
+
+// committed but not applied: [applyPoint, commitPoint)
+type OpLog struct {
+    mu           sync.Mutex
+
+    applyPoint   uint32
+    commitPoint  uint32
+}
+
+func (log *OpLog) getApplyPoint() int {
+    log.mu.Lock()
+    defer log.mu.Unlock()
+
+    return int(log.applyPoint)
+}
+
+func (log *OpLog) apply(applyPoint uint32) {
+    log.mu.Lock()
+    defer log.mu.Unlock()
+
+    if applyPoint < log.applyPoint {
+        panic("Bad applyPoint: alreay applied")
+    } else {
+        log.applyPoint = applyPoint + 1
+    }
+}
+
+func (log *OpLog) nextCommitPoint() int {
+    log.mu.Lock()
+    defer log.mu.Unlock()
+
+    ret := log.commitPoint
+    log.commitPoint += 1
+
+    return int(ret)
 }
 
 type KVPaxos struct {
@@ -53,38 +101,46 @@ type KVPaxos struct {
     px         *paxos.Paxos
 
     store      map[string]string
-    localId    uint64
-}
-
-func (kv *KVPaxos) nextId() uint64 {
-    return atomic.AddUint64(&kv.localId, 1)
+    dups       map[int64]int64
+    log        OpLog
 }
 
 // apply log to store
-func (kv *KVPaxos) commit(op *Op) {
-    switch op.Value {
+func (kv *KVPaxos) apply(op *Op) {
+    switch op.Type {
     case PUT:
         kv.store[op.Key] = op.Value
 
     case APPEND:
-        if v, ok := kv.store[op.Key]; ok {
-            kv.store[op.Key] += v
-        } else {
-            kv.store[op.Key] = v
+        if oldId, exists := kv.dups[op.Clerk]; exists {
+            if oldId >= op.Id {
+                return
+            } else if oldId > op.Id {
+                log.Panicf("OutOrder(ck: %d, old: %d, new: %d)", op.Clerk, oldId, op.Id)
+            }
         }
+
+        if v, ok := kv.store[op.Key]; ok {
+            kv.store[op.Key] = v + op.Value
+        } else {
+            kv.store[op.Key] = op.Value
+        }
+
+        kv.dups[op.Clerk] = op.Id
     }
 }
 
 // apply all logs <= seq
 func (kv *KVPaxos) catchup(seq int) {
-    for i := kv.px.Min(); i <= seq; i++ {
+    for i := kv.log.getApplyPoint(); i <= seq; i++ {
         v, notGarbage := kv.wait(i)
         if notGarbage {
-            kv.commit(v)
+            kv.apply(v)
         }
     }
 
     kv.px.Done(seq)
+    kv.log.apply(uint32(seq))
     DPrintf("Catchup(me: %d, seq: %d)", kv.me, seq)
 }
 
@@ -96,8 +152,8 @@ func (kv *KVPaxos) wait(seq int) (*Op, bool) {
 
         switch status {
         case paxos.Decided:
-            if o, ok := v.(*Op); ok {
-                return o, true
+            if o, ok := v.(Op); ok {
+                return &o, true
             } else {
                 return nil, false
             }
@@ -109,8 +165,12 @@ func (kv *KVPaxos) wait(seq int) (*Op, bool) {
             }
 
         case paxos.Forgotten:
+            if seq < kv.px.Min() {
+                DPrintf("WaitFailed(me: %d, seq: %d, min: %d)", kv.me, seq, kv.px.Min())
+                return nil, false
+            }
             // we haven't heard of the seq(others might know it because of partitioning), so propose a new one
-            kv.px.Start(seq, &Op{})
+            kv.px.Start(seq, Op{})
 
         default:
             log.Panicf("BadSeq(result: unknown, me: %d, seq: %d, status: %d)", kv.me, seq, status)
@@ -120,12 +180,15 @@ func (kv *KVPaxos) wait(seq int) (*Op, bool) {
 
 // append the log entry and return its final offset/seq
 func (kv *KVPaxos) appendLog(op *Op) int {
+    op.Sender = kv.me
     for {
-        seq := kv.px.Max() + 1
-        kv.px.Start(seq, op)
+        seq := kv.log.nextCommitPoint()
+        op.Offset = uint64(seq)
+        kv.px.Start(seq, *op)
         o, notGarbage := kv.wait(seq)
         if notGarbage {
             if equals(o, op) {
+                DPrintf("AppendLog(me: %d, seq: %d, key: %s, ck: %d, id: %d)", kv.me, seq, op.Key, op.Clerk, op.Id)
                 return seq
             } else {
                 DPrintf("AppendLog(result: conflicts, me: %d, seq: %d)", kv.me, seq)
@@ -150,7 +213,9 @@ func (kv *KVPaxos) localGet(args *GetArgs, reply *GetReply) {
 func (kv *KVPaxos) Get(args *GetArgs, reply *GetReply) error {
     DPrintf("Get(me: %d, key: %s, min: %d, max: %d)", kv.me, args.Key, kv.px.Min(), kv.px.Max())
 
-    op := &Op{GET, args.Key, "", kv.me, kv.nextId()}
+    start := time.Now()
+
+    op := &Op{GET, args.Key, "", 0, 0, 0, 0}
 
     kv.mu.Lock()
     defer kv.mu.Unlock()
@@ -159,23 +224,30 @@ func (kv *KVPaxos) Get(args *GetArgs, reply *GetReply) error {
     kv.catchup(offset)
     kv.localGet(args, reply)
 
+    elapse := time.Since(start)
+    DPrintf("Get(me: %d, key: %s, elapse: %s)", kv.me, args.Key, elapse)
+
     return nil
 }
 
 func (kv *KVPaxos) buildOp(args *PutAppendArgs) *Op {
     if args.Op == "Put" {
-        return &Op{PUT, args.Key, args.Value, kv.me, kv.nextId()}
+        return &Op{PUT, args.Key, args.Value, 0, 0, args.Clerk, args.Id}
     } else {
-        return &Op{APPEND, args.Key, args.Value, kv.me, kv.nextId()}
+        return &Op{APPEND, args.Key, args.Value, 0, 0, args.Clerk, args.Id}
     }
 }
 
 func (kv *KVPaxos) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error {
-    DPrintf("PutAppend(me: %d, key: %s, min: %d, max: %d)", kv.me, args.Key, kv.px.Min(), kv.px.Max())
+    DPrintf("PutAppend(me: %d, key: %s, ck: %d, id: %d)", kv.me, args.Key, args.Clerk, args.Id)
+    start := time.Now()
 
     op := kv.buildOp(args)
     kv.appendLog(op)
     reply.Err = OK
+
+    elapse := time.Since(start)
+    DPrintf("PutAppend(me: %d, key: %s, elapse: %s)", kv.me, args.Key, elapse)
 
     return nil
 }
@@ -220,9 +292,8 @@ func StartServer(servers []string, me int) *KVPaxos {
 
     kv := new(KVPaxos)
     kv.me = me
-
-    // Your initialization code here.
-    gob.Register(&Op{})
+    kv.store = make(map[string]string)
+    kv.dups  = make(map[int64]int64)
 
     rpcs := rpc.NewServer()
     rpcs.Register(kv)

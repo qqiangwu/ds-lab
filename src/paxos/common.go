@@ -5,7 +5,21 @@ import (
     "net"
     "syscall"
     "fmt"
+    "log"
 )
+
+var Debug = 0
+
+func DPrintf(format string, a ...interface{}) (n int, err error) {
+    if Debug > 0 {
+        log.Printf(format, a...)
+    }
+    return
+}
+
+func SetLogLevel(level int) {
+    Debug = level
+}
 
 //
 // call() sends an RPC to the rpcname handler on server srv
@@ -39,7 +53,6 @@ func call(srv string, name string, args interface{}, reply interface{}) bool {
         return true
     }
 
-    fmt.Println(err)
     return false
 }
 

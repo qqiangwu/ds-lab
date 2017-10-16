@@ -417,7 +417,7 @@ func TestForgetMem(t *testing.T) {
     time.Sleep(3 * time.Second)
     for i := 0; i < npaxos; i++ {
         if pxa[i].Min() != 11 {
-            t.Fatalf("expected Min() %v, got %v\n", 11, pxa[i].Min())
+            t.Fatalf("i=%v, expected Min() %v, got %v\n", i, 11, pxa[i].Min())
         }
     }
 

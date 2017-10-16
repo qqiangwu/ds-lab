@@ -12,6 +12,8 @@ type PutAppendArgs struct {
     Key   string
     Value string
     Op    string // "Put" or "Append"
+    Clerk int64
+    Id    int64
 }
 
 type PutAppendReply struct {

@@ -4,14 +4,10 @@ import "net/rpc"
 import "crypto/rand"
 import "math/big"
 
-import (
-    "fmt"
-    "log"
-)
-
 type Clerk struct {
     servers []string
-    // You will have to modify this struct.
+    me      int64
+    id      int64
 }
 
 func nrand() int64 {
@@ -24,7 +20,8 @@ func nrand() int64 {
 func MakeClerk(servers []string) *Clerk {
     ck := new(Clerk)
     ck.servers = servers
-    // You'll have to add code here.
+    ck.me = nrand()
+
     return ck
 }
 
@@ -58,8 +55,12 @@ func call(srv string, rpcname string,
         return true
     }
 
-    fmt.Println(err)
     return false
+}
+
+func (ck *Clerk) nextId() int64 {
+    ck.id++
+    return ck.id
 }
 
 //
@@ -71,34 +72,33 @@ func (ck *Clerk) Get(key string) string {
     args := &GetArgs{key}
     reply := &GetReply{}
 
-    for _, server := range ck.servers {
-        if call(server, "KVPaxos.Get", args, reply) {
-            if reply.Err == OK {
-                return reply.Value
-            } else {
-                return ""
+    for {
+        for _, server := range ck.servers {
+            if call(server, "KVPaxos.Get", args, reply) {
+                if reply.Err == OK {
+                    return reply.Value
+                } else {
+                    return ""
+                }
             }
         }
     }
-
-    log.Panicf("ClertGet(result: allDied)")
-    return ""
 }
 
 //
 // shared by Put and Append.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-    args := &PutAppendArgs{key, value, op}
+    args := &PutAppendArgs{key, value, op, ck.me, ck.nextId()}
     reply := &PutAppendReply{}
 
-    for _, server := range ck.servers {
-        if call(server, "KVPaxos.PutAppend", args, reply) {
-            return
+    for {
+        for _, server := range ck.servers {
+            if call(server, "KVPaxos.PutAppend", args, reply) {
+                return
+            }
         }
     }
-
-    log.Panicf("ClertPutAppend(result: allDied)")
 }
 
 func (ck *Clerk) Put(key string, value string) {

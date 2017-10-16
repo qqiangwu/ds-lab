@@ -416,11 +416,11 @@ func TestUnreliable(t *testing.T) {
                 myck.Append(key, "2")
                 vv = NextValue(vv, "2")
                 time.Sleep(100 * time.Millisecond)
-                if myck.Get(key) != vv {
-                    t.Fatalf("wrong value")
+                if mv := myck.Get(key); mv != vv {
+                    t.Fatalf("wrong value 1: key: %v, get: %s, want: %s", key, mv, vv)
                 }
-                if myck.Get(key) != vv {
-                    t.Fatalf("wrong value")
+                if mv := myck.Get(key); mv != vv {
+                    t.Fatalf("wrong value 2: key: %v, get: %s, want: %s", key, mv, vv)
                 }
                 ok = true
             }(cli)
@@ -708,4 +708,8 @@ func TestManyPartition(t *testing.T) {
     if ok {
         fmt.Printf("  ... Passed\n")
     }
+}
+
+func init() {
+    SetLogLevel(1)
 }
