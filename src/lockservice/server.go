@@ -9,6 +9,19 @@ import "os"
 import "io"
 import "time"
 
+// 错误模型
+// nodes: one node fail-stop
+//      primary crash
+//      backup  crash
+// network  reliable/no partition
+// client: won't fail
+//
+// 错误屏蔽
+// 重试: 需要考虑RPC重复的问题(不考虑client错误的条件下可以解决，如何client会出错呢？)
+//
+// 其他
+// 非全序多播
+
 type LockServer struct {
     mu    sync.Mutex
     l     net.Listener
@@ -16,12 +29,25 @@ type LockServer struct {
     dying bool // for test_test.go
 
     am_primary bool   // am I the primary?
-    backup     string // backup's port
+    backup     string
 
     // for each lock name, is it locked?
     locks map[string]bool
+    dups  map[uint64]bool
 }
 
+func (ls *LockServer) isDups(id uint64) (dup bool, result bool) {
+    r, exist := ls.dups[id]
+    if exist {
+        return true, r
+    } else {
+        return false, false
+    }
+}
+
+func (ls *LockServer) cache(id uint64, result bool) {
+    ls.dups[id] = result
+}
 
 //
 // server Lock RPC handler.
@@ -32,15 +58,25 @@ func (ls *LockServer) Lock(args *LockArgs, reply *LockReply) error {
     ls.mu.Lock()
     defer ls.mu.Unlock()
 
+    if dup, res := ls.isDups(args.Id); dup {
+        reply.OK = res
+        return nil
+    }
 
-    locked, _ := ls.locks[args.Lockname]
+    if ls.am_primary {
+        // ignore result
+        call(ls.backup, "LockServer.Lock", args, &LockReply{})
+    }
 
-    if locked {
+    _, exist := ls.locks[args.Lockname]
+    if exist {
         reply.OK = false
     } else {
-        reply.OK = true
         ls.locks[args.Lockname] = true
+        reply.OK = true
     }
+
+    ls.cache(args.Id, reply.OK)
 
     return nil
 }
@@ -49,8 +85,28 @@ func (ls *LockServer) Lock(args *LockArgs, reply *LockReply) error {
 // server Unlock RPC handler.
 //
 func (ls *LockServer) Unlock(args *UnlockArgs, reply *UnlockReply) error {
+    ls.mu.Lock()
+    defer ls.mu.Unlock()
 
-    // Your code here.
+    if dup, result := ls.isDups(args.Id); dup {
+        reply.OK = result
+        return nil
+    }
+
+    if ls.am_primary {
+        // ignore result
+        call(ls.backup, "LockServer.Unlock", args, &UnlockReply{})
+    }
+
+    _, exist := ls.locks[args.Lockname]
+    if exist {
+        delete(ls.locks, args.Lockname)
+        reply.OK = true
+    } else {
+        reply.OK = false
+    }
+
+    ls.cache(args.Id, reply.OK)
 
     return nil
 }
@@ -88,12 +144,10 @@ func (dc DeafConn) Read(p []byte) (n int, err error) {
 
 func StartServer(primary string, backup string, am_primary bool) *LockServer {
     ls := new(LockServer)
-    ls.backup = backup
     ls.am_primary = am_primary
+    ls.backup = backup
     ls.locks = map[string]bool{}
-
-    // Your initialization code here.
-
+    ls.dups  = map[uint64]bool{}
 
     me := ""
     if am_primary {
