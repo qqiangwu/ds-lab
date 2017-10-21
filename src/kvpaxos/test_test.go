@@ -398,6 +398,11 @@ func TestUnreliable(t *testing.T) {
 
     fmt.Printf("Test: Sequence of puts, unreliable ...\n")
 
+    Debug = 1
+    defer func(){
+        Debug = 0
+    }()
+
     for iters := 0; iters < 6; iters++ {
         const ncli = 5
         var ca [ncli]chan bool
@@ -708,8 +713,4 @@ func TestManyPartition(t *testing.T) {
     if ok {
         fmt.Printf("  ... Passed\n")
     }
-}
-
-func init() {
-    SetLogLevel(1)
 }

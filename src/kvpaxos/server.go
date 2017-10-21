@@ -22,6 +22,13 @@ import (
 // 问题1:ck给m0发送请求，请求还没有执行，又给m1发送了请求，m1执行完成后，又执行了一下一个操作，此时，m0上的操作又开始执行，造成1,2,1的执行
 // 问题2:ck waitFailed，可能是它获取一个commitId后，在等待结果时，另一个ck get获取了一个新的commitId，并且执行完成，然后apply了
 
+/**
+现在的协议本身有一些问题，出现一个场景
+me1: 正在处理150，然后处理了151，此时，150还没有处理完毕
+
+clerk观察到151已经处理完毕，于是发起新的请求，新的请求到了me1，me1尝试150，然后运气很好的抢到了150这个位置的决定权
+*/
+
 var Debug = 0
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
@@ -218,11 +225,10 @@ func (kv *KVPaxos) Get(args *GetArgs, reply *GetReply) error {
     op := &Op{GET, args.Key, "", 0, 0, 0, 0}
 
     kv.mu.Lock()
-    defer kv.mu.Unlock()
-
     offset := kv.appendLog(op)
     kv.catchup(offset)
     kv.localGet(args, reply)
+    kv.mu.Unlock()
 
     elapse := time.Since(start)
     DPrintf("Get(me: %d, key: %s, elapse: %s)", kv.me, args.Key, elapse)
@@ -243,7 +249,11 @@ func (kv *KVPaxos) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error {
     start := time.Now()
 
     op := kv.buildOp(args)
+
+    kv.mu.Lock()
     kv.appendLog(op)
+    kv.mu.Unlock()
+
     reply.Err = OK
 
     elapse := time.Since(start)
