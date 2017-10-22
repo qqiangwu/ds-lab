@@ -398,11 +398,6 @@ func TestUnreliable(t *testing.T) {
 
     fmt.Printf("Test: Sequence of puts, unreliable ...\n")
 
-    Debug = 1
-    defer func(){
-        Debug = 0
-    }()
-
     for iters := 0; iters < 6; iters++ {
         const ncli = 5
         var ca [ncli]chan bool
@@ -439,6 +434,8 @@ func TestUnreliable(t *testing.T) {
     }
 
     fmt.Printf("  ... Passed\n")
+
+    Debug = 1
 
     fmt.Printf("Test: Concurrent clients, unreliable ...\n")
 

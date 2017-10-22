@@ -29,6 +29,11 @@ me1: 正在处理150，然后处理了151，此时，150还没有处理完毕
 clerk观察到151已经处理完毕，于是发起新的请求，新的请求到了me1，me1尝试150，然后运气很好的抢到了150这个位置的决定权
 */
 
+/*
+解决了上面的问题，又发现了新的问题 Put的幂等问题。Put虽然是幂等的，但是，如果重复的Put之间有一个其他的Append，或者说，迟到的Put，即在Clerk看来，
+Put已经完成了，所以它执行了后面的操作。但是之前，可能有一个慢的RPC到达了，它又执行了，于是乎系统状态就被归0了。
+*/
+
 var Debug = 0
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
@@ -114,27 +119,26 @@ type KVPaxos struct {
 
 // apply log to store
 func (kv *KVPaxos) apply(op *Op) {
+    if oldId, exists := kv.dups[op.Clerk]; exists {
+        if oldId >= op.Id {
+            DPrintf("DupRPC(me: %v, key: %v, clerk: %v, id: %v)", kv.me, op.Key, op.Clerk, op.Id)
+            return
+        }
+    }
+
     switch op.Type {
     case PUT:
         kv.store[op.Key] = op.Value
 
     case APPEND:
-        if oldId, exists := kv.dups[op.Clerk]; exists {
-            if oldId >= op.Id {
-                return
-            } else if oldId > op.Id {
-                log.Panicf("OutOrder(ck: %d, old: %d, new: %d)", op.Clerk, oldId, op.Id)
-            }
-        }
-
         if v, ok := kv.store[op.Key]; ok {
             kv.store[op.Key] = v + op.Value
         } else {
             kv.store[op.Key] = op.Value
         }
-
-        kv.dups[op.Clerk] = op.Id
     }
+
+    kv.dups[op.Clerk] = op.Id
 }
 
 // apply all logs <= seq
