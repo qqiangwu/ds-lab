@@ -253,7 +253,10 @@ loop:
 		if failed {
 			// avoid leaking goroutines
 			go func() {
-				for range is {
+                for i := range is {
+                    if i == 0 {
+                        continue
+                    }
 				}
 			}()
 			continue
