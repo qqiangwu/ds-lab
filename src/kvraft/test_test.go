@@ -64,7 +64,6 @@ func checkClntAppends(t *testing.T, clnt int, v string, count int) {
 		}
 		off1 := strings.LastIndex(v, wanted)
 		if off1 != off {
-			fmt.Printf("off1 %v off %v\n", off1, off)
 			t.Fatalf("duplicate element %v in Append result", wanted)
 		}
 		if off <= lastoff {
@@ -450,6 +449,39 @@ func TestSnapshotRPC(t *testing.T) {
 	check(t, ck, "c", "C")
 	check(t, ck, "e", "E")
 	check(t, ck, "1", "1")
+
+	fmt.Printf("  ... Passed\n")
+}
+
+// are the snapshots not too huge? 500 bytes is a generous bound for the
+// operations we're doing here.
+func TestSnapshotSize(t *testing.T) {
+	const nservers = 3
+	maxraftstate := 1000
+	maxsnapshotstate := 500
+	cfg := make_config(t, "snapshotsize", nservers, false, maxraftstate)
+	defer cfg.cleanup()
+
+	ck := cfg.makeClient(cfg.All())
+
+	fmt.Printf("Test: snapshot size is reasonable ...\n")
+
+	for i := 0; i < 200; i++ {
+		ck.Put("x", "0")
+		check(t, ck, "x", "0")
+		ck.Put("x", "1")
+		check(t, ck, "x", "1")
+	}
+
+	// check that servers have thrown away most of their log entries
+	if cfg.LogSize() > 2*maxraftstate {
+		t.Fatalf("logs were not trimmed (%v > 2*%v)", cfg.LogSize(), maxraftstate)
+	}
+
+	// check that the snapshots are not unreasonably large
+	if cfg.SnapshotSize() > maxsnapshotstate {
+		t.Fatalf("snapshot too large (%v > %v)", cfg.SnapshotSize(), maxsnapshotstate)
+	}
 
 	fmt.Printf("  ... Passed\n")
 }
