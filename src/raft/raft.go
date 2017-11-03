@@ -48,6 +48,7 @@ const (
     FOLLOWER FsmState = iota
     CANDIDATE
     LEADER
+    KILLED
 )
 
 type RoleHandler interface {
@@ -71,6 +72,18 @@ type Raft struct {
     currentTerm int
     votedFor    int
 }
+
+type KilledHandler struct {
+    rf      *Raft
+}
+
+func (hd *KilledHandler) enter(rf *Raft) {
+    hd.rf = rf
+}
+
+func (hd *KilledHandler) leave() {}
+func (hd *KilledHandler) handleVote(args *RequestVoteArgs, reply *RequestVoteReply) {}
+func (hd *KilledHandler) appendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {}
 
 type FollowerHandler struct {
     rf               *Raft
@@ -146,22 +159,21 @@ type CandidateHandler struct {
 
 func (hd *CandidateHandler) resetTimer() {
     timeout := time.Duration(rand.Intn(TIMEOUT_MAX - TIMEOUT_MIN) + TIMEOUT_MIN) * time.Millisecond
-    hd.electionTimer = time.AfterFunc(timeout, func(term int) func(){
-        return func() { hd.onElectionTimeout(term) }
-    }(hd.rf.currentTerm))
+    hd.electionTimer = time.AfterFunc(timeout, hd.onElectionTimeout)
 }
 
-func (hd *CandidateHandler) onElectionTimeout(term int) {
+func (hd *CandidateHandler) onElectionTimeout() {
     hd.rf.mu.Lock()
     defer hd.rf.mu.Unlock()
 
     // eliminate legacy timers
-    if hd.rf.handler != hd || hd.rf.currentTerm != term {
+    if hd.rf.handler != hd {
         return
     }
 
     DPrintf("CandidateTimeout(me: %v, term: %v)", hd.rf.me, hd.rf.currentTerm)
-    hd.rf.becomeCandidate()
+    hd.resetTimer()
+    go hd.startElection(hd.rf, hd.rf.me, hd.rf.currentTerm, hd.rf.peers)
 }
 
 func (hd *CandidateHandler) startElection(rf *Raft, me int, term int, peers []*labrpc.ClientEnd) {
@@ -178,6 +190,7 @@ func (hd *CandidateHandler) startElection(rf *Raft, me int, term int, peers []*l
 
                 if votes * 2 > len(peers) {
                     rf.mu.Lock()
+                    // two duplicated voting: 同一个term，follower只会给一个人投票，因此，只要term不变，无所谓的
                     if rf.currentTerm == term {
                         rf.becomeLeader()
                     }
@@ -387,6 +400,10 @@ func (rf *Raft) readPersist(data []byte) {
 }
 
 func (rf *Raft) validateTerm(requestTerm int) {
+    if rf.role == KILLED {
+        return
+    }
+
     if rf.currentTerm < requestTerm {
         rf.currentTerm = requestTerm
         rf.becomeFollower()
@@ -513,7 +530,9 @@ func (rf *Raft) Kill() {
     DPrintf("Kill(me: %v)", rf.me)
 
     rf.handler.leave()
-    rf.handler = nil
+    rf.role = KILLED
+    rf.handler = &KilledHandler{}
+    rf.handler.enter(rf)
 }
 
 //
