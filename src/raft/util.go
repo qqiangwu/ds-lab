@@ -11,3 +11,19 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	}
 	return
 }
+
+func tail(log []LogEntry) LogEntry {
+    return log[len(log) - 1]
+}
+
+func min(a int, b int) int {
+    if a < b {
+        return a
+    } else {
+        return b
+    }
+}
+
+func majority(rf *Raft) int {
+    return len(rf.peers) / 2 + 1
+}

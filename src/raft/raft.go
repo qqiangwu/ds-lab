@@ -36,6 +36,7 @@ type FsmHandler interface {
 
     handleVote(args *RequestVoteArgs, reply *RequestVoteReply)
     appendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply)
+    submit(command interface{}) (int, int, bool)
 }
 
 //
@@ -50,6 +51,55 @@ type ApplyMsg struct {
 	Snapshot    []byte // ignore for lab2; only used in lab3
 }
 
+type LogEntry struct {
+    Term        int
+    Index       int
+    Command     interface{}
+}
+
+// one for each Raft, run in background
+type Applier struct {
+    stopCmd     chan bool
+    buffer      chan LogEntry
+    sender      chan ApplyMsg
+}
+
+func makeApplier(applyCh chan ApplyMsg) *Applier {
+    applier := &Applier{}
+    applier.stopCmd = make(chan bool)
+    applier.buffer = make(chan LogEntry)
+    applier.sender = applyCh
+
+    go applier.run()
+
+    return applier
+}
+
+func (applier *Applier) apply(entry LogEntry) {
+    applier.buffer <- entry
+}
+
+// @pre run in a standalone goroutine
+func (applier *Applier) run() {
+    for {
+        select {
+        case entry := <- applier.buffer:
+            msg := ApplyMsg{}
+            msg.Index = entry.Index
+            msg.Command = entry.Command
+
+            applier.sender <- msg
+
+        case <-applier.stopCmd:
+            return
+        }
+    }
+}
+
+func (applier *Applier) stop() {
+    applier.stopCmd <- true
+}
+
 //
 // A Go object implementing a single Raft peer.
 //
@@ -57,10 +107,15 @@ type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
-	me          int                 // this peer's index into peers[]
-    currentTerm int
+	me          int               // this peer's index into peers[]
+    applier   *Applier
 
-    handler     FsmHandler          // guarded by mu
+    // guarded by mu
+    currentTerm int
+    handler     FsmHandler
+    log         []LogEntry
+    commitIndex int
+    lastApplied int
 }
 
 // return currentTerm and whether this server
@@ -106,6 +161,15 @@ func (rf *Raft) readPersist(data []byte) {
     // TODO
 }
 
+// @pre rf.mu.Locked
+func (rf *Raft) applyNew() {
+    for rf.commitIndex > rf.lastApplied {
+        rf.lastApplied++
+        rf.applier.apply(rf.log[rf.lastApplied])
+    }
+}
+
+// @pre rf.mu.Locked
 func (rf *Raft) validateTerm(term int) bool {
     if rf.handler.getState() == KILLED {
         return false
@@ -119,8 +183,10 @@ func (rf *Raft) validateTerm(term int) bool {
     return rf.currentTerm == term
 }
 
+// become follower don't change term
+// @pre rf.mu.Locked
 func (rf *Raft) becomeFollower() {
-    if rf.currentTerm != -1 {
+    if rf.currentTerm != 0 {
         // assert term = 0
         rf.handler.leave()
     }
@@ -130,6 +196,7 @@ func (rf *Raft) becomeFollower() {
     DPrintf("BecomeFollower(me: %v, term: %v)", rf.me, rf.currentTerm)
 }
 
+// @pre rf.mu.Locked
 func (rf *Raft) becomeCandidate() {
     rf.currentTerm++
     rf.handler.leave()
@@ -139,6 +206,8 @@ func (rf *Raft) becomeCandidate() {
     DPrintf("BecomeCandidate(me: %v, term: %v)", rf.me, rf.currentTerm)
 }
 
+// become leader don't change term
+// @pre rf.mu.Locked
 func (rf *Raft) becomeLeader() {
     rf.handler.leave()
     rf.handler = &LeaderHandler{}
@@ -147,27 +216,18 @@ func (rf *Raft) becomeLeader() {
     DPrintf("BecomeLeader(me: %v, term: %v)", rf.me, rf.currentTerm)
 }
 
-//
-// example RequestVote RPC arguments structure.
-// field names must start with capital letters!
-//
 type RequestVoteArgs struct {
     Term                int         // candidate term
     CandidateId         int
+    LastLogIndex        int
+    LastLogTerm         int
 }
 
-//
-// example RequestVote RPC reply structure.
-// field names must start with capital letters!
-//
 type RequestVoteReply struct {
 	Term                int // term of the current peer
     VoteGranted         bool
 }
 
-//
-// example RequestVote RPC handler.
-//
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
     rf.mu.Lock()
     defer rf.mu.Unlock()
@@ -183,6 +243,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 type AppendEntriesArgs struct {
     Term                int     // leader term
     LeaderId            int
+    PrevLogIndex        int
+    PrevLogTerm         int
+    Entries             []LogEntry
+    LeaderCommit        int
 }
 
 type AppendEntriesReply struct {
@@ -250,16 +314,12 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // term. the third return value is true if this server believes it is
 // the leader.
 //
+// @returns index,term,isLeader
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
+    rf.mu.Lock()
+    defer rf.mu.Unlock()
 
-	// Your code here (2B).
-    // TODO
-
-
-	return index, term, isLeader
+    return rf.handler.submit(command)
 }
 
 //
@@ -268,16 +328,20 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // in Kill(), but it might be convenient to (for example)
 // turn off debug output from this instance.
 //
+// @pre rf.mu.Locked
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
     rf.mu.Lock()
     defer rf.mu.Unlock()
 
+    rf.currentTerm++
     rf.handler.leave()
     rf.handler = &KilledHandler{}
     rf.handler.enter(rf)
+    rf.applier.stop()
 
-    DPrintf("Kill(me: %v, term: %v)", rf.me, rf.currentTerm)
+    DPrintf("Kill(me: %v, term: %v, commitIndex: %v, applied: %v)",
+        rf.me, rf.currentTerm, rf.commitIndex, rf.lastApplied)
 }
 
 //
@@ -297,8 +361,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
-    rf.currentTerm = -1
+    rf.applier = makeApplier(applyCh)
     rf.becomeFollower()
+    rf.log = []LogEntry{ LogEntry{0, 0, nil} }
 
     // Your initialization code here (2A, 2B, 2C).
 

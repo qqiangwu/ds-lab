@@ -78,6 +78,10 @@ func make_config(t *testing.T, n int, unreliable bool) *config {
 	return cfg
 }
 
+func (cfg *config) getId(i int) int {
+    return cfg.rafts[i].me
+}
+
 // shut down a Raft server but save its persistent state.
 func (cfg *config) crash1(i int) {
 	cfg.disconnect(i)
