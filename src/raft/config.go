@@ -320,7 +320,10 @@ func (cfg *config) checkNoLeader() {
 		if cfg.connected[i] {
 			_, is_leader := cfg.rafts[i].GetState()
 			if is_leader {
-				cfg.t.Fatalf("expected no leader, but %v claims to be leader", i)
+                for _, rf := range cfg.rafts {
+                    fmt.Printf("%v\n", rf.ToDebugString())
+                }
+				cfg.t.Fatalf("expected no leader, but peer %v claims to be leader", i)
 			}
 		}
 	}
@@ -432,6 +435,11 @@ func (cfg *config) one(cmd int, expectedServers int) int {
 			time.Sleep(50 * time.Millisecond)
 		}
 	}
+
+    for _, rf := range cfg.rafts {
+        fmt.Printf("%v\n", rf.ToDebugString())
+    }
+
 	cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 	return -1
 }

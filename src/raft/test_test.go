@@ -60,13 +60,13 @@ func TestReElection2A(t *testing.T) {
 
 	// if the old leader rejoins, that shouldn't
 	// disturb the old leader.
-    fmt.Printf("old leader reconnected\n")
+    fmt.Printf("old leader reconnected: %v\n", leader1)
 	cfg.connect(leader1)
 	leader2 := cfg.checkOneLeader()
 
 	// if there's no quorum, no leader should
 	// be elected.
-    fmt.Printf("no quorum\n")
+    fmt.Printf("no quorum(disconnect: %v, %v)\n", leader2, (leader2 + 1) % servers)
 	cfg.disconnect(leader2)
 	cfg.disconnect((leader2 + 1) % servers)
 	time.Sleep(2 * RaftElectionTimeout)
@@ -753,10 +753,13 @@ func TestFigure8Unreliable2C(t *testing.T) {
 
 	fmt.Printf("Test (2C): Figure 8 (unreliable) ...\n")
 
+    fmt.Printf("initail agreement\n")
 	cfg.one(rand.Int()%10000, 1)
 
+    // TODO
+    niters := 400
 	nup := servers
-	for iters := 0; iters < 1000; iters++ {
+	for iters := 0; iters < niters; iters++ {
 		if iters == 200 {
 			cfg.setlongreordering(true)
 		}
@@ -777,6 +780,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 		}
 
 		if leader != -1 && (rand.Int()%1000) < int(RaftElectionTimeout/time.Millisecond)/2 {
+            fmt.Printf("disconnect leader: %v\n", leader)
 			cfg.disconnect(leader)
 			nup -= 1
 		}
@@ -784,12 +788,14 @@ func TestFigure8Unreliable2C(t *testing.T) {
 		if nup < 3 {
 			s := rand.Int() % servers
 			if cfg.connected[s] == false {
+                fmt.Printf("bring %v back\n", s)
 				cfg.connect(s)
 				nup += 1
 			}
 		}
 	}
 
+    fmt.Printf("connect all and run an agreement\n")
 	for i := 0; i < servers; i++ {
 		if cfg.connected[i] == false {
 			cfg.connect(i)

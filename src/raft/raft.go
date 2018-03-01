@@ -19,6 +19,9 @@ package raft
 
 import "sync"
 import "labrpc"
+import "bytes"
+import "encoding/gob"
+import "fmt"
 
 type FsmState int
 const (
@@ -37,6 +40,8 @@ type FsmHandler interface {
     handleVote(args *RequestVoteArgs, reply *RequestVoteReply)
     appendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply)
     submit(command interface{}) (int, int, bool)
+
+    toDebugString() string
 }
 
 //
@@ -112,8 +117,9 @@ type Raft struct {
 
     // guarded by mu
     currentTerm int
-    handler     FsmHandler
+    votedFor     int
     log         []LogEntry
+    handler     FsmHandler
     commitIndex int
     lastApplied int
 }
@@ -132,33 +138,31 @@ func (rf *Raft) GetState() (int, bool) {
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
 //
+// @pre rf.mu.Locked
 func (rf *Raft) persist() {
-	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := gob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
-    // TODO
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+	e.Encode(rf.log)
+	e.Encode(rf.currentTerm)
+    e.Encode(rf.votedFor)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
 // restore previously persisted state.
 //
+// @note we don't validate the persisted state
 func (rf *Raft) readPersist(data []byte) {
-	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := gob.NewDecoder(r)
-	// d.Decode(&rf.xxx)
-	// d.Decode(&rf.yyy)
-	if data == nil || len(data) < 1 { // bootstrap without any state?
+    if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
 
-    // TODO
+	r := bytes.NewBuffer(data)
+	d := gob.NewDecoder(r)
+	d.Decode(&rf.log)
+	d.Decode(&rf.currentTerm)
+    d.Decode(&rf.votedFor)
 }
 
 // @pre rf.mu.Locked
@@ -178,6 +182,9 @@ func (rf *Raft) validateTerm(term int) bool {
     if rf.currentTerm < term {
         rf.currentTerm = term
         rf.becomeFollower()
+
+        // term and votedFor changed
+        rf.persist()
     }
 
     return rf.currentTerm == term
@@ -202,6 +209,9 @@ func (rf *Raft) becomeCandidate() {
     rf.handler.leave()
     rf.handler = &CandidateHandler{}
     rf.handler.enter(rf)
+
+    // term changed
+    rf.persist()
 
     DPrintf("BecomeCandidate(me: %v, term: %v)", rf.me, rf.currentTerm)
 }
@@ -252,6 +262,8 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
     Term                int     // the receiver's term
     Success             bool
+    TermHint            int
+    IndexHint           int
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -344,6 +356,14 @@ func (rf *Raft) Kill() {
         rf.me, rf.currentTerm, rf.commitIndex, rf.lastApplied)
 }
 
+func (rf *Raft) ToDebugString() string {
+    rf.mu.Lock()
+    defer rf.mu.Unlock()
+
+    return fmt.Sprintf("me: %v, term: %v, commitIndex: %v, applied: %v, handler: %v, log: %v",
+        rf.me, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.handler.toDebugString(), rf.log)
+}
+
 //
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -364,8 +384,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
     rf.applier = makeApplier(applyCh)
     rf.becomeFollower()
     rf.log = []LogEntry{ LogEntry{0, 0, nil} }
-
-    // Your initialization code here (2A, 2B, 2C).
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())

@@ -4,11 +4,11 @@ import "time"
 import "math/rand"
 import "sync"
 import "sync/atomic"
-import "labrpc"
+import "fmt"
 
-const ELECTION_TIMEOUT_MIN = 300
+const ELECTION_TIMEOUT_MIN = 400
 const ELECTION_TIMEOUT_MAX = 800
-const HEARTBEAT_INTERVAL = 200
+const HEARTBEAT_INTERVAL = 100
 
 func randomTimeoutMillis() time.Duration {
     randVal := rand.Intn(ELECTION_TIMEOUT_MAX - ELECTION_TIMEOUT_MIN) + ELECTION_TIMEOUT_MIN
@@ -77,10 +77,12 @@ func (hd *KilledHandler) submit(command interface{}) (int, int, bool) {
     return -1, -1, false
 }
 
+func (hd *KilledHandler) toDebugString() string {
+    return "KILLED"
+}
 
 type FollowerHandler struct {
     rf              *Raft
-    votedFor        int
     heartbeatTimer  *SafeTimer
 }
 
@@ -111,13 +113,14 @@ func (hd *FollowerHandler) onHeartbeatTimeout() {
 // @pre rf.mu.Locked
 func (hd *FollowerHandler) enter(rf *Raft) {
     hd.rf = rf
-    hd.votedFor = NOT_VOTE
+    hd.rf.votedFor = NOT_VOTE
     hd.resetTimer()
 }
 
 // @pre rf.mu.Locked
 func (hd *FollowerHandler) leave() {
     hd.stopTimer()
+    hd.rf.votedFor = NOT_VOTE
 }
 
 // @pre rf.mu.Locked
@@ -127,7 +130,7 @@ func (hd *FollowerHandler) getState() FsmState {
 
 // @pre rf.mu.Locked
 func (hd *FollowerHandler) canGrant(args *RequestVoteArgs) bool {
-    if hd.votedFor == NOT_VOTE {
+    if hd.rf.votedFor == NOT_VOTE {
         lastLog := tail(hd.rf.log)
 
         if args.LastLogTerm > lastLog.Term {
@@ -137,7 +140,7 @@ func (hd *FollowerHandler) canGrant(args *RequestVoteArgs) bool {
         } else {
             return false
         }
-    } else if hd.votedFor == args.CandidateId {
+    } else if hd.rf.votedFor == args.CandidateId {
         return true
     } else {
         return false
@@ -151,7 +154,12 @@ func (hd *FollowerHandler) handleVote(args *RequestVoteArgs, reply *RequestVoteR
     reply.VoteGranted = hd.canGrant(args)
 
     if reply.VoteGranted {
-        hd.votedFor = args.CandidateId
+        DPrintf("Vote(me: %v, term: %v, for: %v)\n", hd.rf.me, hd.rf.currentTerm, args.CandidateId)
+
+        hd.rf.votedFor = args.CandidateId
+
+        // voted
+        hd.rf.persist()
         hd.resetTimer()
     }
 }
@@ -183,11 +191,24 @@ func (hd *FollowerHandler) appendEntries(args *AppendEntriesArgs, reply *AppendE
         if len(args.Entries) != 0 {
             firstNonMatchIndex, entryIndex := findFirstNonMatch(hd.rf.log, args.Entries)
             hd.rf.log = append(hd.rf.log[:firstNonMatchIndex], args.Entries[entryIndex:]...)
+
+            // rf.log changes
+            hd.rf.persist()
         }
         if args.LeaderCommit > hd.rf.commitIndex {
             hd.rf.commitIndex = min(args.LeaderCommit, tail(hd.rf.log).Index)
 
             hd.rf.applyNew()
+        }
+    } else {
+        last := tail(hd.rf.log)
+
+        if last.Index < args.PrevLogIndex {
+            reply.TermHint = last.Term
+            reply.IndexHint = last.Index
+        } else {
+            reply.TermHint = last.Term
+            reply.IndexHint = findTermFirstIndex(hd.rf.log, hd.rf.log[args.PrevLogIndex].Term)
         }
     }
 }
@@ -197,9 +218,14 @@ func (hd *FollowerHandler) submit(command interface{}) (int, int, bool) {
     return -1, -1, false
 }
 
+func (hd *FollowerHandler) toDebugString() string {
+    return "FOLLOWER"
+}
+
 type CandidateHandler struct {
     rf              *Raft
     electionTimer   *SafeTimer
+    votingFinished  int32
 }
 
 // @pre rf.mu.Locked
@@ -237,6 +263,15 @@ func (hd *CandidateHandler) enter(rf *Raft) {
 // @pre rf.mu.Locked
 func (hd *CandidateHandler) leave() {
     hd.stopTimer()
+    hd.stopVoting()
+}
+
+func (hd *CandidateHandler) stopVoting() {
+    atomic.StoreInt32(&hd.votingFinished, 1)
+}
+
+func (hd *CandidateHandler) isVoting() bool {
+    return atomic.LoadInt32(&hd.votingFinished) == 0
 }
 
 // @pre rf.mu.Locked
@@ -249,6 +284,7 @@ func (hd *CandidateHandler) canGrant(args *RequestVoteArgs) bool {
     return hd.rf.me == args.CandidateId
 }
 
+// run in standalone goroutine
 func (hd *CandidateHandler) startElection(term int, lastLogIndex int, lastLogTerm int) {
     args := &RequestVoteArgs{}
     args.Term = term
@@ -258,20 +294,16 @@ func (hd *CandidateHandler) startElection(term int, lastLogIndex int, lastLogTer
 
     result := make(chan bool, len(hd.rf.peers))
 
-    for i, peer := range hd.rf.peers {
-        if i != hd.rf.me {
-            go func(peer *labrpc.ClientEnd) {
-                reply := &RequestVoteReply{}
-                success := peer.Call("Raft.RequestVote", args, reply)
-
-                result <- success && reply.VoteGranted
-            }(peer)
+    for peer := range hd.rf.peers {
+        if peer != hd.rf.me {
+            go hd.askVoteFrom(args, peer, result)
         } else {
             result <- true
         }
     }
 
     voted := 0
+    unvote := 0
     for i := 0; i < len(hd.rf.peers); i++ {
         voteGranted := <-result
         if voteGranted {
@@ -280,14 +312,40 @@ func (hd *CandidateHandler) startElection(term int, lastLogIndex int, lastLogTer
                 hd.tryPromote(term)
                 break
             }
+        } else {
+            unvote++
+            if unvote * 2 > len(hd.rf.peers) {
+                DPrintf("LoseVote(me: %v, term: %v)\n", hd.rf.me, term)
+                hd.stopVoting()
+                break
+            }
         }
     }
+}
+
+// run in standalone goroutine
+func (hd *CandidateHandler) askVoteFrom(args *RequestVoteArgs, peer int, result chan bool) {
+    reply := &RequestVoteReply{}
+
+    for hd.isVoting() {
+        success := hd.rf.peers[peer].Call("Raft.RequestVote", args, reply)
+
+        if success {
+            break
+        }
+
+        // retry when unreliable
+    }
+
+    result <- reply.VoteGranted
 }
 
 // called by election goroutine
 func (hd *CandidateHandler) tryPromote(term int) bool {
     hd.rf.mu.Lock()
     defer hd.rf.mu.Unlock()
+
+    hd.stopVoting()
 
     if term == hd.rf.currentTerm {
         hd.rf.becomeLeader()
@@ -316,6 +374,10 @@ func (hd *CandidateHandler) appendEntries(args *AppendEntriesArgs, reply *Append
 // @pre rf.mu.Locked
 func (hd *CandidateHandler) submit(command interface{}) (int, int, bool) {
     return -1, -1, false
+}
+
+func (hd *CandidateHandler) toDebugString() string {
+    return "CANDIDATE"
 }
 
 // background task
@@ -355,19 +417,19 @@ func (appender *Appender) startSenderFor(peer int) {
     const timeout = time.Duration(HEARTBEAT_INTERVAL) * time.Millisecond
 
     for appender.isRunning() {
-        needSleep := appender.doSend(peer)
+        retry := appender.doSend(peer)
 
-        if needSleep && appender.isRunning() {
+        if !retry && appender.isRunning() {
             time.Sleep(timeout)
         }
     }
 }
 
-func (appender *Appender) doSend(peer int) (needSleep bool) {
+func (appender *Appender) doSend(peer int) (retry bool) {
     args := appender.leader.retrieveEntries(peer)
     if args == nil {
         DPrintf("LeaderLegacy(me: %v, term: %v)", appender.rf.me, appender.term)
-        return
+        return false
     }
 
     reply := &AppendEntriesReply{}
@@ -376,14 +438,15 @@ func (appender *Appender) doSend(peer int) (needSleep bool) {
         if reply.Success {
             appender.leader.onFollowerOk(peer, args)
         } else {
-            appender.leader.onFollowerFailed(peer, args, reply.Term)
+            appender.leader.onFollowerFailed(peer, args, reply)
         }
 
-        isHeartbeat := len(args.Entries) == 0
+        isSyncing := len(args.Entries) != 0
 
-        return isHeartbeat
+        // retry if syncing or not match
+        return isSyncing || !reply.Success
     } else {
-        // do sleep if cannot contact the peer
+        // retry if connecting failed
         return true
     }
 }
@@ -397,7 +460,7 @@ type LeaderHandler struct {
 }
 
 func (hd *LeaderHandler) isLegacy() bool {
-    return hd.term < hd.rf.currentTerm
+    return hd != hd.rf.handler
 }
 
 // called by Appender
@@ -421,19 +484,28 @@ func (hd *LeaderHandler) onFollowerOk(peer int, args *AppendEntriesArgs) {
     }
 }
 
-func (hd *LeaderHandler) onFollowerFailed(peer int, args *AppendEntriesArgs, peerTerm int) {
+func (hd *LeaderHandler) onFollowerFailed(peer int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
     hd.rf.mu.Lock()
     defer hd.rf.mu.Unlock()
 
     if hd.isLegacy() {
+        DPrintf("LegacyLeaderAck(me: %v, term: %v, newTerm: %v)\n", hd.rf.me, hd.term, reply.Term)
         return
     }
-    if hd.term < peerTerm {
-        //hd.rf.currentTerm = peerTerm
-        //hd.rf.becomeFollower()
-        // legacy leader, wait for new leader
+    if hd.term < reply.Term {
+        DPrintf("LegacyLeader(me: %v, term: %v, newTerm: %v)\n", hd.rf.me, hd.term, reply.Term)
+
+        hd.appender.stop()
+        hd.rf.becomeFollower()
     } else {
-        hd.nextIndex[peer]--
+        assert(reply.IndexHint < hd.nextIndex[peer], "IndexHint >= nextIndex")
+
+        entry := hd.rf.log[reply.IndexHint]
+        if entry.Term == reply.TermHint {
+            hd.nextIndex[peer] = reply.IndexHint + 1
+        } else {
+            hd.nextIndex[peer] = reply.IndexHint
+        }
     }
 }
 
@@ -541,7 +613,13 @@ func (hd *LeaderHandler) submit(command interface{}) (int, int, bool) {
     term := hd.rf.currentTerm
 
     hd.rf.log = append(hd.rf.log, LogEntry{term, nextIndex, command})
+    hd.rf.persist()
     hd.matchIndex[hd.rf.me] = nextIndex
 
     return nextIndex, term, true
+}
+
+// @pre rf.mu.Locked
+func (hd* LeaderHandler) toDebugString() string {
+    return fmt.Sprintf("LEADER(next: %v, match: %v)", hd.nextIndex, hd.matchIndex)
 }

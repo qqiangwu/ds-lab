@@ -27,3 +27,19 @@ func min(a int, b int) int {
 func majority(rf *Raft) int {
     return len(rf.peers) / 2 + 1
 }
+
+func findTermFirstIndex(log []LogEntry, term int) int {
+    for i, e := range log {
+        if e.Term == term {
+            return i
+        }
+    }
+
+    return len(log)
+}
+
+func assert(expr bool, msg string) {
+    if !expr {
+        panic(msg)
+    }
+}

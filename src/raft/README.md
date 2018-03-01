@@ -33,3 +33,49 @@ replication时的优化
     + 从协议上来看，我的实现是对的，5会成为Leader，但是由于1,2,5从index=2处就相差，所有收敛需要很长时间
     + 手工添加了一堆sleep，能够正常收敛了
     + 最开始的实现是，每100ms，doSend，现在看来，不同follower速率不一样，这样做没有意思，每个follower一个线程好了
+        + 这样太浪费线程资源了吧
+
+
+# 2C Persistence
+## 需要persiste的状态
+log/voteFor/currentTerm，数据每次更改，都需要持久化。其中，currentTerm可以包含在logEntry中，一次append。voteFor需要单独的append。不对，currentTerm与log并不一致，也需要单独的append
+
+candidate reboot不影响系统正确性，leader失效恢复后成为follower，同样不影响。follower则不行，它reboot前后，如果选举正在进行中，则reboot后，可能给另外一个人投票，造成一个人投了两次不一样的票
+
+需要注意的是，voteFor一定是最后一个entry，当有新的log后的，或者term改变，则voteFor过时了
+
+## 何时读取持久化信息
+reboot时恢复
+
+## 问题
+对三个变量的更新遍布在各处，如何最化小开销？
+
+# 不可靠网络
+之前的实现出了问题，因为，投票时，没有考虑网络的不可靠性，所以，candidate只发出一次投票，但在大部分情况下，由于网络不可靠，回复都丢了。
+
+因此，为每一个follower起一个goroutine。
+
+改了之后还是错。
+
+进一步思考：添加更多的日志，以从日志中看出网络丢包事件。
+
+又改了一些东西，当doSend时，如果validation失败，则立即重试
+
+想了一下，还是要启动不匹配时的优化，从而减少RPC数量，否则，恶劣网络条件下，花费的时间太长。原有实现中，不匹配时，回退一个index，更改的实现是，回退整个term。Follower返回冲突点的term及此term的第一个index，从而给candidate更多的信息。从而，一个RPC就可以解决一个Term的冲突。
+
+论文中没有采取此优化，因为，它假设网络不会那么差；然而在此Lab中，网络的确很差。
+
+同时，group commit时，没有限制entries的大小，实际工作中肯定要限制。
+
+考虑几种情况：
+
++ conflict: return follower.term + first index in the term
++ f.index < c.index: return f.term + f.max-index
+
+然后又发现其他的错误，old leader reconnect后，checkOneLeader成功的，但disconntect其他之后，old leader还是leader。说明，new leader的心跳还没有发给old。于是，我在old leader append检测到新term时，自动退化
+
+然而并没有用，还是出问题，于是乎只好把心跳间隔设置成更小。
+
+测试2B时，又出现新的问题，一个assert不满足！一定要测试Assert!
+
+添加了不匹配时的回退优化，但还是有问题，因此，提高follower超时timeout，给leader更多时间去同步。

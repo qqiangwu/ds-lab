@@ -1,0 +1,5 @@
+#! /bin/bash
+for i in {0..5};
+do
+    go test -run Figure8Unre &> log/figure8-${i}.log;
+done
