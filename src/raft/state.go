@@ -417,10 +417,18 @@ func (appender *Appender) startSenderFor(peer int) {
     const timeout = time.Duration(HEARTBEAT_INTERVAL) * time.Millisecond
 
     for appender.isRunning() {
-        retry := appender.doSend(peer)
+        ch := make(chan bool)
+        go func(){
+            ch <- appender.doSend(peer)
+        }()
 
-        if !retry && appender.isRunning() {
-            time.Sleep(timeout)
+        select {
+        case retry := <-ch:
+            if !retry && appender.isRunning() {
+                time.Sleep(timeout)
+            }
+
+        case <-time.After(timeout):
         }
     }
 }
@@ -583,7 +591,7 @@ func (hd *LeaderHandler) enter(rf *Raft) {
 // @pre rf.mu.Locked
 func (hd *LeaderHandler) leave() {
     hd.appender.stop()
-    hd.appender = nil
+    // hd.appender = nil
 }
 
 // @pre rf.mu.Locked

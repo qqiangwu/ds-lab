@@ -79,3 +79,6 @@ reboot时恢复
 测试2B时，又出现新的问题，一个assert不满足！一定要测试Assert!
 
 添加了不匹配时的回退优化，但还是有问题，因此，提高follower超时timeout，给leader更多时间去同步。
+
+# LongDelay
+Re election中总是有一个用例不过。old leader断网。然后再回来。再全部断开。一二步之间，old leader不会主动ping别人，因为long delay block住了。同时，新leader也无法ping到old，同样，在第一个请求中block住了。这意味着，对于单个follower的ping，也必须是严格按照interval来的，否则，会造成block
