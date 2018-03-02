@@ -756,8 +756,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
     fmt.Printf("initail agreement\n")
 	cfg.one(rand.Int()%10000, 1)
 
-    // TODO
-    niters := 400
+    niters := 1000
 	nup := servers
 	for iters := 0; iters < niters; iters++ {
 		if iters == 200 {

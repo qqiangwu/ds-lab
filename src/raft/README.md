@@ -82,3 +82,8 @@ reboot时恢复
 
 # LongDelay
 Re election中总是有一个用例不过。old leader断网。然后再回来。再全部断开。一二步之间，old leader不会主动ping别人，因为long delay block住了。同时，新leader也无法ping到old，同样，在第一个请求中block住了。这意味着，对于单个follower的ping，也必须是严格按照interval来的，否则，会造成block
+
+# IndexHint >= nextIndex[peer]
+由于appendEntries的响应会延迟，多次发送造成重复，因此，在onFollowerFailed中进行nextIndex回退时，会出现旧的nack。
+
+分布式系统中的消息处理函数必须是幂等的，因为消息会重复。

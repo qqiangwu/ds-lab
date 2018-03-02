@@ -506,7 +506,11 @@ func (hd *LeaderHandler) onFollowerFailed(peer int, args *AppendEntriesArgs, rep
         hd.appender.stop()
         hd.rf.becomeFollower()
     } else {
-        assert(reply.IndexHint < hd.nextIndex[peer], "IndexHint >= nextIndex")
+        // assert(reply.IndexHint < hd.nextIndex[peer], "IndexHint >= nextIndex")
+        if reply.IndexHint >= hd.nextIndex[peer] {
+            // duplicated response
+            return
+        }
 
         entry := hd.rf.log[reply.IndexHint]
         if entry.Term == reply.TermHint {
