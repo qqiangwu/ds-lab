@@ -56,6 +56,7 @@ type Applier struct {
 
     // protected by mu
     pendingCalls     map[int]*PendingCall
+    termOfPending    int
 }
 
 func makeApplier(kv *RaftKV) *Applier {
@@ -97,7 +98,31 @@ func (ap *Applier) run() {
             }
 
         case <-time.After(timeout):
+            ap.removeLegacy()
         }
+    }
+}
+
+func (ap *Applier) removeLegacy() {
+    ap.kv.mu.Lock()
+    defer ap.kv.mu.Unlock()
+
+    ap.removeLegacyWithLockHeld()
+}
+
+func (ap *Applier) removeLegacyWithLockHeld() {
+    currentTerm, _ := ap.rf.GetState()
+    if currentTerm == ap.termOfPending {
+        return
+    } else if currentTerm < ap.termOfPending {
+        panic("currentTerm < ap.termOfPending @ removeLegacy")
+    } else {
+        for _, call := range ap.pendingCalls {
+            call.cancel()
+        }
+
+        ap.pendingCalls = make(map[int]*PendingCall)
+        ap.termOfPending = currentTerm
     }
 }
 
@@ -112,9 +137,9 @@ func (ap *Applier) apply(msg raft.ApplyMsg) {
     }
 
     call, exist := ap.pendingCalls[msg.Index]
+    currentTerm, isLeader := ap.rf.GetState()
     if exist {
         // waiter on it
-        currentTerm, isLeader := ap.rf.GetState()
         if call.term < currentTerm || !isLeader {
             // legacy
             call.cancel()
@@ -145,6 +170,10 @@ func (ap *Applier) waitOn(index int, term int, reply interface{}) <-chan bool {
     }
 
     ap.pendingCalls[index] = pendingCall
+    if ap.termOfPending < term {
+        ap.removeLegacyWithLockHeld()
+        ap.termOfPending = term
+    }
 
     return pendingCall.resultCh
 }

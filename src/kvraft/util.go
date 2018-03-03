@@ -25,3 +25,11 @@ func getOrDefault(m map[int64]int, k int64, defaultV int) int {
         return defaultV
     }
 }
+
+func max(a int, b int) int {
+    if a > b {
+        return a
+    } else {
+        return b
+    }
+}

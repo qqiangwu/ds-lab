@@ -34,3 +34,5 @@
     + 最后还是applyNew时放了锁，但这必须保证，调用applyNew时，对象保持invariant
 + 第一个死锁问题修正
 + 遇到第二个死锁问题：出现在partition one client中
+    + 过程应该是这样的，等待结果时，leader隔离了，于是client阻塞了。后来隔离结束，client应该能够检测到。
+    + 解决方法是，定时检查term，如果term改变了，则移除所有旧的waiters
