@@ -62,49 +62,6 @@ type LogEntry struct {
     Command     interface{}
 }
 
-// one for each Raft, run in background
-type Applier struct {
-    stopCmd     chan bool
-    buffer      chan LogEntry
-    sender      chan ApplyMsg
-}
-
-func makeApplier(applyCh chan ApplyMsg) *Applier {
-    applier := &Applier{}
-    applier.stopCmd = make(chan bool)
-    applier.buffer = make(chan LogEntry)
-    applier.sender = applyCh
-
-    go applier.run()
-
-    return applier
-}
-
-func (applier *Applier) apply(entry LogEntry) {
-    applier.buffer <- entry
-}
-
-// @pre run in a standalone goroutine
-func (applier *Applier) run() {
-    for {
-        select {
-        case entry := <- applier.buffer:
-            msg := ApplyMsg{}
-            msg.Index = entry.Index
-            msg.Command = entry.Command
-
-            applier.sender <- msg
-
-        case <-applier.stopCmd:
-            return
-        }
-    }
-}
-
-func (applier *Applier) stop() {
-    applier.stopCmd <- true
-}
-
 //
 // A Go object implementing a single Raft peer.
 //
@@ -112,8 +69,8 @@ type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
-	me          int               // this peer's index into peers[]
-    applier   *Applier
+	me        int               // this peer's index into peers[]
+    applier   chan ApplyMsg
 
     // guarded by mu
     currentTerm int
@@ -169,8 +126,20 @@ func (rf *Raft) readPersist(data []byte) {
 func (rf *Raft) applyNew() {
     for rf.commitIndex > rf.lastApplied {
         rf.lastApplied++
-        rf.applier.apply(rf.log[rf.lastApplied])
+        rf.apply(rf.log[rf.lastApplied])
     }
+}
+
+// @pre rf.mu.Locked
+func (rf *Raft) apply(entry LogEntry) {
+    rf.mu.Unlock()
+    defer rf.mu.Lock()
+
+    msg := ApplyMsg{}
+    msg.Index = entry.Index
+    msg.Command = entry.Command
+
+    rf.applier <- msg
 }
 
 // @pre rf.mu.Locked
@@ -350,7 +319,6 @@ func (rf *Raft) Kill() {
     rf.handler.leave()
     rf.handler = &KilledHandler{}
     rf.handler.enter(rf)
-    rf.applier.stop()
 
     DPrintf("Kill(me: %v, term: %v, commitIndex: %v, applied: %v)",
         rf.me, rf.currentTerm, rf.commitIndex, rf.lastApplied)
@@ -381,7 +349,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
-    rf.applier = makeApplier(applyCh)
+    rf.applier = applyCh
     rf.becomeFollower()
     rf.log = []LogEntry{ LogEntry{0, 0, nil} }
 

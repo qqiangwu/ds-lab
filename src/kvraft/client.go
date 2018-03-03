@@ -3,11 +3,14 @@ package raftkv
 import "labrpc"
 import "crypto/rand"
 import "math/big"
-
+import "time"
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
-	// You will have to modify this struct.
+
+    id      int64
+    seq     int
+    leader  int
 }
 
 func nrand() int64 {
@@ -20,7 +23,7 @@ func nrand() int64 {
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
-	// You'll have to add code here.
+    ck.id = nrand()
 	return ck
 }
 
@@ -37,8 +40,34 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
+    nservers := len(ck.servers)
 
-	// You will have to modify this function.
+    args := &GetArgs{}
+    args.Key = key
+
+    for {
+        // either block or retry
+        for i := 0; i < nservers; i++ {
+            server := (ck.leader + i) % nservers
+            reply := &GetReply{}
+
+            ok := ck.servers[server].Call("RaftKV.Get", args, reply)
+            if ok {
+                if !reply.WrongLeader {
+                    ck.leader = server
+                    if reply.Err == OK {
+                        return reply.Value
+                    } else {
+                        return ""
+                    }
+                }
+            }
+        }
+
+        // avoid busy loop
+        time.Sleep(50 * time.Millisecond)
+    }
+
 	return ""
 }
 
@@ -53,7 +82,35 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	// You will have to modify this function.
+    nservers := len(ck.servers)
+
+    ck.seq++
+
+    args := &PutAppendArgs{}
+    args.Key = key
+    args.Value = value
+    args.Op = op
+    args.Client = ck.id
+    args.Seq = ck.seq
+
+    for {
+        // either block or retry
+        for i := 0; i < nservers; i++ {
+            server := (ck.leader + i) % nservers
+            reply := &PutAppendReply{}
+
+            ok := ck.servers[server].Call("RaftKV.PutAppend", args, reply)
+            if ok {
+                if !reply.WrongLeader {
+                    ck.leader = server
+                    return
+                }
+            }
+        }
+
+        // avoid busy loop
+        time.Sleep(50 * time.Millisecond)
+    }
 }
 
 func (ck *Clerk) Put(key string, value string) {

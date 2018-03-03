@@ -7,14 +7,14 @@ const (
 
 type Err string
 
+// change server's state, need de-duplicate
 // Put or Append
 type PutAppendArgs struct {
 	Key   string
 	Value string
-	Op    string // "Put" or "Append"
-	// You'll have to add definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+	Op    string
+    Client int64
+    Seq    int
 }
 
 type PutAppendReply struct {
@@ -22,9 +22,9 @@ type PutAppendReply struct {
 	Err         Err
 }
 
+// won't change server's state, it's safe to execute multi-times.
 type GetArgs struct {
 	Key string
-	// You'll have to add definitions here.
 }
 
 type GetReply struct {
