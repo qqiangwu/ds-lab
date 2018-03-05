@@ -39,7 +39,8 @@ type Clerk struct {
 	sm       *shardmaster.Clerk
 	config   shardmaster.Config
 	make_end func(string) *labrpc.ClientEnd
-	// You will have to modify this struct.
+    id       int64
+    seq      int
 }
 
 //
@@ -55,8 +56,14 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck := new(Clerk)
 	ck.sm = shardmaster.MakeClerk(masters)
 	ck.make_end = make_end
-	// You'll have to add code here.
+    ck.id = nrand()
 	return ck
+}
+
+func (ck *Clerk) nextSeq() int {
+    seq := ck.seq
+    ck.seq++
+    return seq
 }
 
 //
@@ -73,7 +80,8 @@ func (ck *Clerk) Get(key string) string {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
 		if servers, ok := ck.config.Groups[gid]; ok {
-			// try each server for the shard.
+            args.ConfigNum = ck.config.Num
+
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
 				var reply GetReply
@@ -87,7 +95,6 @@ func (ck *Clerk) Get(key string) string {
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
-		// ask master for the latest configuration.
 		ck.config = ck.sm.Query(-1)
 	}
 
@@ -103,12 +110,15 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args.Key = key
 	args.Value = value
 	args.Op = op
-
+    args.Client = ck.id
+    args.Seq = ck.nextSeq()
 
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
 		if servers, ok := ck.config.Groups[gid]; ok {
+            args.ConfigNum = ck.config.Num
+
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
 				var reply PutAppendReply

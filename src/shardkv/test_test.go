@@ -7,6 +7,10 @@ import "fmt"
 import "sync/atomic"
 import "math/rand"
 
+func init() {
+    Debug = 1
+}
+
 func check(t *testing.T, ck *Clerk, key string, value string) {
 	v := ck.Get(key)
 	if v != value {

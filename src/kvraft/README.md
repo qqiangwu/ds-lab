@@ -36,3 +36,12 @@
 + 遇到第二个死锁问题：出现在partition one client中
     + 过程应该是这样的，等待结果时，leader隔离了，于是client阻塞了。后来隔离结束，client应该能够检测到。
     + 解决方法是，定时检查term，如果term改变了，则移除所有旧的waiters
++ Snapshot
+    + 遇到死锁
+    + raft启动时，除了加载raft state，还需要加载snapshot，即，原本不在持久化列表中的commitIndex,lastApplied
+    + 当20个客户端一起发请求时，会出现log瞬间满了，但是一条都没有提交。此时，log.LastIndex与kv的index相关，snapshot时会失败。
+        + 直接在raft.log处检查了
++ Snapshot时的乱序问题
+    + follower检查，发现prevIndex在snapshot中，这可能是因为这是一条重复的消息，帮回复-1，-1
+    + leader接受到消息时，消息可能是旧的消息的回复，也可能是新消息的回复，在-1,-1时，前者可以忽略，后者则意味着协议有问题
+    + 解决：为消息添加ts

@@ -5,6 +5,8 @@ import "math/rand"
 import "sync"
 import "sync/atomic"
 import "fmt"
+import "bytes"
+import "encoding/gob"
 
 const ELECTION_TIMEOUT_MIN = 400
 const ELECTION_TIMEOUT_MAX = 800
@@ -131,12 +133,12 @@ func (hd *FollowerHandler) getState() FsmState {
 // @pre rf.mu.Locked
 func (hd *FollowerHandler) canGrant(args *RequestVoteArgs) bool {
     if hd.rf.votedFor == NOT_VOTE {
-        lastLog := tail(hd.rf.log)
+        lastIndex, lastTerm := hd.rf.log.TailMeta()
 
-        if args.LastLogTerm > lastLog.Term {
+        if args.LastLogTerm > lastTerm {
             return true
-        } else if args.LastLogTerm == lastLog.Term {
-            return args.LastLogIndex >= lastLog.Index
+        } else if args.LastLogTerm == lastTerm {
+            return args.LastLogIndex >= lastIndex
         } else {
             return false
         }
@@ -164,17 +166,11 @@ func (hd *FollowerHandler) handleVote(args *RequestVoteArgs, reply *RequestVoteR
     }
 }
 
-func findFirstNonMatch(log []LogEntry, trailer []LogEntry) (int, int) {
-    for i, v := range trailer {
-        if existInLog := v.Index < len(log); !existInLog {
-            return v.Index, i
-        }
-        if match := v.Term == log[v.Index].Term; !match {
-            return v.Index, i
-        }
-    }
+// @prev prevIndex is not in snapshot
+func (hd *FollowerHandler) isPrefixMatch(prevIndex int, prevTerm int) bool {
+    lastIndex, _ := hd.rf.log.TailMeta()
 
-    return len(log), len(trailer)
+    return prevIndex <= lastIndex && hd.rf.log.GetTerm(prevIndex) == prevTerm
 }
 
 // @pre args.Term == rf.currentTerm
@@ -182,33 +178,45 @@ func findFirstNonMatch(log []LogEntry, trailer []LogEntry) (int, int) {
 func (hd *FollowerHandler) appendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
     hd.resetTimer()
 
-    prefixMatch := args.PrevLogIndex < len(hd.rf.log) && hd.rf.log[args.PrevLogIndex].Term == args.PrevLogTerm
-
     reply.Term = hd.rf.currentTerm
-    reply.Success = prefixMatch
 
-    if prefixMatch {
-        if len(args.Entries) != 0 {
-            firstNonMatchIndex, entryIndex := findFirstNonMatch(hd.rf.log, args.Entries)
-            hd.rf.log = append(hd.rf.log[:firstNonMatchIndex], args.Entries[entryIndex:]...)
-
-            // rf.log changes
-            hd.rf.persist()
-        }
-        if args.LeaderCommit > hd.rf.commitIndex {
-            hd.rf.commitIndex = min(args.LeaderCommit, tail(hd.rf.log).Index)
-
-            hd.rf.applyNew()
-        }
+    if hd.rf.log.InSnapshot(args.PrevLogIndex + 1) {
+        //reply.Success = true
+        //reply.IndexHint = hd.rf.log.LastIndex + 1
+        //reply.TermHint = hd.rf.log.LastTerm
+        reply.Success = false
+        reply.IndexHint = -1
+        reply.TermHint = -1
     } else {
-        last := tail(hd.rf.log)
+        prefixMatch := hd.isPrefixMatch(args.PrevLogIndex, args.PrevLogTerm)
+        reply.Success = prefixMatch
 
-        if last.Index < args.PrevLogIndex {
-            reply.TermHint = last.Term
-            reply.IndexHint = last.Index
+        if prefixMatch {
+            if len(args.Entries) != 0 {
+                firstNonMatchIndex, entryIndex := hd.rf.log.FindFirstNonMatch(args.Entries)
+                hd.rf.log.RemoveFrom(firstNonMatchIndex)
+                hd.rf.log.AppendRange(args.Entries[entryIndex:])
+
+                // rf.log changes
+                hd.rf.persist()
+            }
+            if args.LeaderCommit > hd.rf.commitIndex {
+                lastIndex, _ := hd.rf.log.TailMeta()
+                hd.rf.commitIndex = min(args.LeaderCommit, lastIndex)
+                hd.rf.applyNew()
+            }
         } else {
-            reply.TermHint = last.Term
-            reply.IndexHint = findTermFirstIndex(hd.rf.log, hd.rf.log[args.PrevLogIndex].Term)
+            lastIndex, lastTerm := hd.rf.log.TailMeta()
+
+            if lastIndex < args.PrevLogIndex {
+                // no conflicts, self log is too short
+                reply.TermHint = lastTerm
+                reply.IndexHint = lastIndex
+            } else {
+                // conflicts
+                reply.TermHint = lastTerm
+                reply.IndexHint = hd.rf.log.FindTermFirstIndex(args.PrevLogIndex)
+            }
         }
     }
 }
@@ -256,8 +264,8 @@ func (hd *CandidateHandler) enter(rf *Raft) {
     hd.rf = rf
     hd.resetTimer()
 
-    lastLog := tail(rf.log)
-    go hd.startElection(rf.currentTerm, lastLog.Index, lastLog.Term)
+    lastIndex, lastTerm := rf.log.TailMeta()
+    go hd.startElection(rf.currentTerm, lastIndex, lastTerm)
 }
 
 // @pre rf.mu.Locked
@@ -415,11 +423,12 @@ func (appender *Appender) isRunning() bool {
 // @pre in a standalone goroutine
 func (appender *Appender) startSenderFor(peer int) {
     const timeout = time.Duration(HEARTBEAT_INTERVAL) * time.Millisecond
+    var ts int32
 
     for appender.isRunning() {
         ch := make(chan bool)
         go func(){
-            ch <- appender.doSend(peer)
+            ch <- appender.doSend(peer, &ts)
         }()
 
         select {
@@ -433,29 +442,50 @@ func (appender *Appender) startSenderFor(peer int) {
     }
 }
 
-func (appender *Appender) doSend(peer int) (retry bool) {
-    args := appender.leader.retrieveEntries(peer)
-    if args == nil {
+func (appender *Appender) doSend(peer int, ts *int32) (retry bool) {
+    seq := atomic.AddInt32(ts, 1)
+
+    args, snapshot := appender.leader.retrieveEntries(peer)
+    if args == nil && snapshot == nil {
         DPrintf("LeaderLegacy(me: %v, term: %v)", appender.rf.me, appender.term)
         return false
-    }
-
-    reply := &AppendEntriesReply{}
-    success := appender.rf.peers[peer].Call("Raft.AppendEntries", args, reply)
-    if success {
-        if reply.Success {
-            appender.leader.onFollowerOk(peer, args)
-        } else {
-            appender.leader.onFollowerFailed(peer, args, reply)
-        }
-
-        isSyncing := len(args.Entries) != 0
-
-        // retry if syncing or not match
-        return isSyncing || !reply.Success
+    } else if snapshot != nil {
+        DPrintf("SendSnapshot(me: %v, term: %v, peer: %v, sterm: %v, sindex: %v)",
+            appender.rf.me, appender.term, peer, snapshot.LastIncludedTerm, snapshot.LastIncludedIndex)
+        appender.rf.peers[peer].Call("Raft.InstallSnapshot", snapshot, &InstallSnapshotReply{})
+        return false
     } else {
-        // retry if connecting failed
-        return true
+        reply := &AppendEntriesReply{}
+        success := appender.rf.peers[peer].Call("Raft.AppendEntries", args, reply)
+        if seq < atomic.LoadInt32(ts) {
+            // what about wrap?
+            return false
+        } else if success {
+            if reply.Success {
+                appender.leader.onFollowerOk(peer, args)
+            } else {
+                snapshot := appender.leader.onFollowerFailed(peer, args, reply)
+                if snapshot != nil {
+                    DPrintf("SendSnapshot(me: %v, term: %v, peer: %v, sterm: %v, sindex: %v)",
+                        appender.rf.me, appender.term, peer, snapshot.LastIncludedTerm, snapshot.LastIncludedIndex)
+                    // send snapshot and don't retry
+                    sreply := InstallSnapshotReply{}
+                    appender.rf.peers[peer].Call("Raft.InstallSnapshot", snapshot, &sreply)
+                    if sreply.Term > appender.leader.term {
+                        // ignored: actually we can stop being leader here
+                    }
+                    return false
+                }
+            }
+
+            isSyncing := len(args.Entries) != 0
+
+            // retry if syncing or not match
+            return isSyncing || !reply.Success
+        } else {
+            // retry if connecting failed
+            return true
+        }
     }
 }
 
@@ -492,42 +522,78 @@ func (hd *LeaderHandler) onFollowerOk(peer int, args *AppendEntriesArgs) {
     }
 }
 
-func (hd *LeaderHandler) onFollowerFailed(peer int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
+func (hd *LeaderHandler) isPeerAlreadySnapshot(reply *AppendEntriesReply) bool {
+    return reply.IndexHint < 0
+}
+
+func (hd *LeaderHandler) onFollowerFailed(peer int, args *AppendEntriesArgs, reply *AppendEntriesReply) (snapshot *InstallSnapshotArgs){
     hd.rf.mu.Lock()
     defer hd.rf.mu.Unlock()
 
     if hd.isLegacy() {
         DPrintf("LegacyLeaderAck(me: %v, term: %v, newTerm: %v)\n", hd.rf.me, hd.term, reply.Term)
-        return
-    }
-    if hd.term < reply.Term {
+    } else if hd.term < reply.Term {
         DPrintf("LegacyLeader(me: %v, term: %v, newTerm: %v)\n", hd.rf.me, hd.term, reply.Term)
 
         hd.appender.stop()
         hd.rf.becomeFollower()
+    } else if hd.isPeerAlreadySnapshot(reply) {
+        // 可能来源于一旧新消息的返回值
+        // 保证自己不死就行了，不用管别人
+        // 但是Raft是一个完整的组成部分，任意一部分出问题都会响应其他部分啊
+        DPrintf("PeerSnapshoted(me: %v, term: %v: peer: %v, prevIndex: %v): peer snapshot uncommitted entries", 
+            hd.rf.me, hd.term, peer, args.PrevLogIndex)
+    } else if reply.IndexHint >= hd.nextIndex[peer] {
+        // duplicated response
     } else {
-        // assert(reply.IndexHint < hd.nextIndex[peer], "IndexHint >= nextIndex")
-        if reply.IndexHint >= hd.nextIndex[peer] {
-            // duplicated response
-            return
-        }
+        if hd.rf.log.InSnapshot(reply.IndexHint) {
+            lastIndex, lastTerm, data := hd.loadSnapshot(peer)
 
-        entry := hd.rf.log[reply.IndexHint]
-        if entry.Term == reply.TermHint {
+            // the previous is sent
+            snapshot = &InstallSnapshotArgs{
+                Term: hd.term,
+                LeaderId: hd.rf.me,
+                LastIncludedIndex: lastIndex,
+                LastIncludedTerm: lastTerm,
+                Offset: 0,
+                Data: data,
+                Done: true}
+
+            hd.nextIndex[peer] = lastIndex + 1
+        } else if term := hd.rf.log.GetTerm(reply.IndexHint); term == reply.TermHint {
             hd.nextIndex[peer] = reply.IndexHint + 1
         } else {
             hd.nextIndex[peer] = reply.IndexHint
         }
     }
+
+    return snapshot
+}
+
+// @pre rf.mu.Locked
+func (hd *LeaderHandler) loadSnapshot(peer int) (lastIndex int, lastTerm int, data []byte) {
+    data = hd.rf.persister.ReadSnapshot()
+
+    if data == nil || len(data) == 0 {
+        return 0, 0, data
+    }
+
+    // read meta
+    buffer := bytes.NewBuffer(data)
+    decoder := gob.NewDecoder(buffer)
+    decoder.Decode(&lastIndex)
+    decoder.Decode(&lastTerm)
+
+    return lastIndex, lastTerm, data
 }
 
 // called by Appender
-func (hd *LeaderHandler) retrieveEntries(peer int) *AppendEntriesArgs {
+func (hd *LeaderHandler) retrieveEntries(peer int) (*AppendEntriesArgs, *InstallSnapshotArgs) {
     hd.rf.mu.Lock()
     defer hd.rf.mu.Unlock()
 
     if hd.isLegacy() {
-        return nil
+        return nil, nil
     }
 
     args := &AppendEntriesArgs{}
@@ -535,20 +601,38 @@ func (hd *LeaderHandler) retrieveEntries(peer int) *AppendEntriesArgs {
     args.LeaderId = hd.rf.me
     args.LeaderCommit = hd.rf.commitIndex
 
-    if tail(hd.rf.log).Index >= hd.nextIndex[peer] {
-        args.Entries = hd.rf.log[hd.nextIndex[peer]:]
+    if hd.rf.log.InSnapshot(hd.nextIndex[peer]) {
+        lastIndex, lastTerm, data := hd.loadSnapshot(peer)
+
+        // the previous is sent
+        snapshot := &InstallSnapshotArgs{
+            Term: hd.term,
+            LeaderId: hd.rf.me,
+            LastIncludedIndex: lastIndex,
+            LastIncludedTerm: lastTerm,
+            Offset: 0,
+            Data: data,
+            Done: true}
+
+        hd.nextIndex[peer] = lastIndex + 1
+        return nil, snapshot
+    }
+
+    lastIndex, _ := hd.rf.log.TailMeta()
+    if lastIndex >= hd.nextIndex[peer] {
+        args.Entries = hd.rf.log.GetFrom(hd.nextIndex[peer])
     }
 
     if len(args.Entries) == 0 {
-        args.PrevLogIndex = tail(hd.rf.log).Index
+        args.PrevLogIndex = lastIndex
     } else {
         headIndex := args.Entries[0].Index
         args.PrevLogIndex = headIndex - 1
     }
 
-    args.PrevLogTerm = hd.rf.log[args.PrevLogIndex].Term
+    args.PrevLogTerm = hd.rf.log.GetTerm(args.PrevLogIndex)
 
-    return args
+    return args, nil
 }
 
 // @pre rf.mu.Locked
@@ -583,9 +667,9 @@ func (hd *LeaderHandler) enter(rf *Raft) {
     hd.nextIndex = make([]int, len(rf.peers))
     hd.matchIndex = make([]int, len(rf.peers))
 
-    lastLogIndex := tail(rf.log).Index
+    nextIndex := rf.log.NextIndex()
     for i := range hd.nextIndex {
-        hd.nextIndex[i] = lastLogIndex + 1
+        hd.nextIndex[i] = nextIndex
     }
 
     hd.appender = makeAppender(hd)
@@ -621,10 +705,10 @@ func (hd *LeaderHandler) appendEntries(args *AppendEntriesArgs, reply *AppendEnt
 
 // @pre rf.mu.Locked
 func (hd *LeaderHandler) submit(command interface{}) (int, int, bool) {
-    nextIndex := len(hd.rf.log)
+    nextIndex := hd.rf.log.NextIndex()
     term := hd.rf.currentTerm
 
-    hd.rf.log = append(hd.rf.log, LogEntry{term, nextIndex, command})
+    hd.rf.log.AppendEntry(LogEntry{term, nextIndex, command})
     hd.rf.persist()
     hd.matchIndex[hd.rf.me] = nextIndex
 

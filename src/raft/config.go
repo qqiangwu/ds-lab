@@ -172,7 +172,7 @@ func (cfg *config) start1(i int) {
 				cfg.mu.Unlock()
 
 				if m.Index > 1 && prevok == false {
-					err_msg = fmt.Sprintf("server %v apply out of order %v", i, m.Index)
+					err_msg = fmt.Sprintf("server %v apply out of order (index: %v): %v", i, m.Index, cfg.rafts[i].ToDebugString())
 				}
 			} else {
 				err_msg = fmt.Sprintf("committed command %v is not an int", m.Command)

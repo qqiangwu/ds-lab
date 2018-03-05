@@ -1,5 +1,6 @@
 package raftkv
 
+import "raft"
 import "testing"
 import "strconv"
 import "time"
@@ -197,14 +198,15 @@ func GenericTest(t *testing.T, tag string, nclients int, unreliable bool, crash 
 		}
 
 		if crash {
-			// log.Printf("shutdown servers\n")
+			log.Printf("shutdown servers\n")
 			for i := 0; i < nservers; i++ {
 				cfg.ShutdownServer(i)
 			}
 			// Wait for a while for servers to shutdown, since
 			// shutdown isn't a real crash and isn't instantaneous
 			time.Sleep(electionTimeout)
-			// log.Printf("restart servers\n")
+			
+            log.Printf("restart servers\n")
 			// crash and re-start all
 			for i := 0; i < nservers; i++ {
 				cfg.StartServer(i)
@@ -212,7 +214,7 @@ func GenericTest(t *testing.T, tag string, nclients int, unreliable bool, crash 
 			cfg.ConnectAll()
 		}
 
-		// log.Printf("wait for clients\n")
+		log.Printf("wait for clients\n")
 		for i := 0; i < nclients; i++ {
 			// log.Printf("read from clients %d\n", i)
 			j := <-clnts[i]
@@ -416,6 +418,7 @@ func TestSnapshotRPC3B(t *testing.T) {
 	ck.Put("a", "A")
 	check(t, ck, "a", "A")
 
+    fmt.Printf("One partitioned\n")
 	// a bunch of puts into the majority partition.
 	cfg.partition([]int{0, 1}, []int{2})
 	{
@@ -435,6 +438,7 @@ func TestSnapshotRPC3B(t *testing.T) {
 
 	// now make group that requires participation of
 	// lagging server, so that it has to catch up.
+    fmt.Printf("Another one partitioned\n")
 	cfg.partition([]int{0, 2}, []int{1})
 	{
 		ck1 := cfg.makeClient([]int{0, 2})
@@ -448,6 +452,8 @@ func TestSnapshotRPC3B(t *testing.T) {
 
 	// now everybody
 	cfg.partition([]int{0, 1, 2}, []int{})
+
+    fmt.Printf("Recovered\n")
 
 	ck.Put("e", "E")
 	check(t, ck, "c", "C")
@@ -500,17 +506,18 @@ func TestSnapshotRecoverManyClients3B(t *testing.T) {
 	GenericTest(t, "snapshotunreliable", 20, false, true, false, 1000)
 }
 
-func TestSnapshotUnreliable3B(t *testing.T) {
+func TestSnapshotUnreliable3B4(t *testing.T) {
+    raft.Debug = 0
 	fmt.Printf("Test: persistence with several clients, snapshots, unreliable ...\n")
 	GenericTest(t, "snapshotunreliable", 5, true, false, false, 1000)
 }
 
-func TestSnapshotUnreliableRecover3B(t *testing.T) {
+func TestSnapshotUnreliableRecover3B5(t *testing.T) {
 	fmt.Printf("Test: persistence with several clients, failures, and snapshots, unreliable ...\n")
 	GenericTest(t, "snapshotunreliablecrash", 5, true, true, false, 1000)
 }
 
-func TestSnapshotUnreliableRecoverConcurrentPartition3B(t *testing.T) {
+func TestSnapshotUnreliableRecoverConcurrentPartition3B6(t *testing.T) {
 	fmt.Printf("Test: persistence with several clients, failures, and snapshots, unreliable and partitions ...\n")
 	GenericTest(t, "snapshotunreliableconcurpartitions", 5, true, true, true, 1000)
 }

@@ -51,15 +51,13 @@ type FsmHandler interface {
 //
 type ApplyMsg struct {
 	Index       int
+    Term        int
 	Command     interface{}
-	UseSnapshot bool   // ignore for lab2; only used in lab3
-	Snapshot    []byte // ignore for lab2; only used in lab3
+	UseSnapshot bool
+	Snapshot    []byte
 }
 
-type LogEntry struct {
-    Term        int
-    Index       int
-    Command     interface{}
+type NoOp struct {
 }
 
 //
@@ -69,13 +67,13 @@ type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
-	me        int               // this peer's index into peers[]
+	me        int                 // this peer's index into peers[]
     applier   chan ApplyMsg
 
     // guarded by mu
     currentTerm int
-    votedFor     int
-    log         []LogEntry
+    votedFor    int
+    log         Log
     handler     FsmHandler
     commitIndex int
     lastApplied int
@@ -97,13 +95,14 @@ func (rf *Raft) GetState() (int, bool) {
 //
 // @pre rf.mu.Locked
 func (rf *Raft) persist() {
-	w := new(bytes.Buffer)
-	e := gob.NewEncoder(w)
+	buffer := new(bytes.Buffer)
+	e := gob.NewEncoder(buffer)
+
 	e.Encode(rf.log)
 	e.Encode(rf.currentTerm)
     e.Encode(rf.votedFor)
-	data := w.Bytes()
-	rf.persister.SaveRaftState(data)
+
+	rf.persister.SaveRaftState(buffer.Bytes())
 }
 
 //
@@ -117,16 +116,28 @@ func (rf *Raft) readPersist(data []byte) {
 
 	r := bytes.NewBuffer(data)
 	d := gob.NewDecoder(r)
+
 	d.Decode(&rf.log)
 	d.Decode(&rf.currentTerm)
     d.Decode(&rf.votedFor)
+}
+
+func (rf *Raft) loadSnapshot() {
+    data := rf.persister.ReadSnapshot()
+    if len(data) == 0 {
+        return
+    }
+
+    buffer := bytes.NewBuffer(data)
+    decoder := gob.NewDecoder(buffer)
+    decoder.Decode(&rf.lastApplied)
 }
 
 // @pre rf.mu.Locked
 func (rf *Raft) applyNew() {
     for rf.commitIndex > rf.lastApplied {
         rf.lastApplied++
-        rf.apply(rf.log[rf.lastApplied])
+        rf.apply(rf.log.Get(rf.lastApplied))
     }
 }
 
@@ -134,12 +145,16 @@ func (rf *Raft) applyNew() {
 func (rf *Raft) apply(entry LogEntry) {
     rf.mu.Unlock()
     defer rf.mu.Lock()
+    
+    _, ok := entry.Command.(NoOp)
+    if !ok {
+        msg := ApplyMsg{}
+        msg.Index = entry.Index
+        msg.Term = entry.Term
+        msg.Command = entry.Command
 
-    msg := ApplyMsg{}
-    msg.Index = entry.Index
-    msg.Command = entry.Command
-
-    rf.applier <- msg
+        rf.applier <- msg
+    }
 }
 
 // @pre rf.mu.Locked
@@ -169,7 +184,7 @@ func (rf *Raft) becomeFollower() {
     rf.handler = &FollowerHandler{}
     rf.handler.enter(rf)
 
-    DPrintf("BecomeFollower(me: %v, term: %v)", rf.me, rf.currentTerm)
+    DPrintf("BecomeFollower(me: %v, term: %v, index: %v)", rf.me, rf.currentTerm, rf.lastApplied)
 }
 
 // @pre rf.mu.Locked
@@ -245,6 +260,62 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
         reply.Term = rf.currentTerm
         reply.Success = false
     }
+}
+
+type InstallSnapshotArgs struct {
+    Term        int
+    LeaderId    int
+    LastIncludedIndex int
+    LastIncludedTerm   int
+    Offset      int
+    Data        []byte
+    Done        bool
+}
+
+type InstallSnapshotReply struct {
+    Term        int
+}
+
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+    rf.mu.Lock()
+    defer rf.mu.Unlock()
+
+    if rf.validateTerm(args.Term) {
+        DPrintf("InstallSnapshot(me: %v, term: %v, from: %v, sIndex: %v, sTerm: %v)", 
+            rf.me, rf.currentTerm, args.LeaderId, args.LastIncludedIndex, args.LastIncludedTerm)
+
+        rf.mu.Unlock()
+
+        msg := ApplyMsg{}
+        msg.Term = args.LastIncludedTerm
+        msg.Index = args.LastIncludedIndex
+        msg.UseSnapshot = true
+        msg.Snapshot = args.Data
+        rf.applier <- msg
+
+        rf.mu.Lock()
+    }
+
+    reply.Term = rf.currentTerm
+}
+
+func (rf *Raft) OnSnapshot(index int, term int) {
+    rf.mu.Lock()
+    defer rf.mu.Unlock()
+
+    assert(index >= rf.log.LastIndex, "Snapshot too old")
+
+    if index > rf.commitIndex {
+        rf.commitIndex = index
+    }
+    if index > rf.lastApplied {
+        rf.lastApplied = index
+    }
+
+    rf.log.Snapshot(index, term)
+    rf.persist()
+
+    DPrintf("OnSnapshot(me: %v, term: %v, sterm: %v, sindex: %v)", rf.me, rf.currentTerm, rf.log.LastTerm, rf.log.LastIndex)
 }
 
 //
@@ -345,17 +416,19 @@ func (rf *Raft) ToDebugString() string {
 //
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
+    gob.Register(NoOp{})
+
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
     rf.applier = applyCh
-    rf.becomeFollower()
-    rf.log = []LogEntry{ LogEntry{0, 0, nil} }
-
-	// initialize from state persisted before a crash
+    rf.handler = &FollowerHandler{}
+    rf.handler.enter(rf)
+    rf.loadSnapshot()
 	rf.readPersist(persister.ReadRaftState())
 
+    DPrintf("RaftStart(me: %v, term: %v, lastApplied: %v)", rf.me, rf.currentTerm, rf.lastApplied)
 
 	return rf
 }

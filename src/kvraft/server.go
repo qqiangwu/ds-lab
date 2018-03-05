@@ -2,11 +2,14 @@ package raftkv
 
 import (
 	"encoding/gob"
+    "bytes"
 	"labrpc"
 	"raft"
 	"sync"
     "sync/atomic"
     "time"
+    "errors"
+    "fmt"
 )
 
 type OpKind int
@@ -94,29 +97,28 @@ func (ap *Applier) run() {
         select {
         case msg := <-ap.applyCh:
             if ap.isRunning() {
-                DPrintf("Apply(me: %v, index: %v, msg: %v)", ap.kv.me, msg.Index, msg.Command)
                 ap.apply(msg)
             }
 
         case <-time.After(timeout):
-            ap.removeLegacy()
+            ap.removeLegacyWaiters()
         }
     }
 }
 
-func (ap *Applier) removeLegacy() {
+func (ap *Applier) removeLegacyWaiters() {
     ap.kv.mu.Lock()
     defer ap.kv.mu.Unlock()
 
-    ap.removeLegacyWithLockHeld()
+    ap.removeLegacyWaitersWithLockHeld()
 }
 
-func (ap *Applier) removeLegacyWithLockHeld() {
+func (ap *Applier) removeLegacyWaitersWithLockHeld() {
     currentTerm, _ := ap.rf.GetState()
     if currentTerm == ap.termOfPending {
         return
     } else if currentTerm < ap.termOfPending {
-        panic("currentTerm < ap.termOfPending @ removeLegacy")
+        panic("currentTerm < ap.termOfPending @ removeLegacyWaiters")
     } else {
         for _, call := range ap.pendingCalls {
             call.cancel()
@@ -132,9 +134,24 @@ func (ap *Applier) apply(msg raft.ApplyMsg) {
     ap.kv.mu.Lock()
     defer ap.kv.mu.Unlock()
 
+    if msg.Index <= ap.kv.appliedIndex {
+        return
+    }
+
+    if msg.UseSnapshot {
+        ap.kv.loadSnapshot(msg.Snapshot)
+        ap.kv.snapshot()
+        return
+    }
+    
+    DPrintf("Apply(me: %v, index: %v, msg: %v)", ap.kv.me, msg.Index, msg.Command)
+
+    ap.kv.appliedIndex = msg.Index
+    ap.kv.term = msg.Term
+
     op, ok := msg.Command.(Op)
     if !ok {
-        return
+        panic("Bad op when apply")
     }
 
     call, exist := ap.pendingCalls[msg.Index]
@@ -166,13 +183,13 @@ func (ap *Applier) waitOn(index int, term int, reply interface{}) <-chan bool {
     call, exist := ap.pendingCalls[index]
     if exist {
         // the index already exist a pending call, it must be left in the last leadership
-        assert(call.term < term, "legacy pending call have equal or larger term")
+        assert(call.term < term, fmt.Sprintf("legacy pending call have equal or larger term(%v >= %v)", call.term, term))
         call.cancel()
     }
 
     ap.pendingCalls[index] = pendingCall
     if ap.termOfPending < term {
-        ap.removeLegacyWithLockHeld()
+        ap.removeLegacyWaitersWithLockHeld()
         ap.termOfPending = term
     }
 
@@ -183,12 +200,15 @@ type RaftKV struct {
 	mu      sync.Mutex
 	me      int
 	rf      *raft.Raft
+    persister    *raft.Persister
 	applyCh chan raft.ApplyMsg
     applier *Applier
-
 	maxraftstate int // snapshot if log grows this big
 
     // protected by mu
+    stopped      bool
+    appliedIndex int
+    term         int
     store       map[string]string
     dups        map[int64]int
 }
@@ -290,6 +310,29 @@ func (kv *RaftKV) doAppend(op *Op, reply *PutAppendReply) {
     reply.Err = OK
 }
 
+var ErrNotLeader = errors.New("Wrong leader")
+var ErrNotFound = errors.New("No key")
+
+func (kv *RaftKV) KvGet(key string) (string, error) {
+    args := GetArgs{key}
+    reply := GetReply{}
+
+    kv.Get(&args, &reply)
+
+    switch {
+    case reply.WrongLeader: return "", ErrNotLeader
+    case reply.Err == ErrNoKey: return "", ErrNotFound
+    case reply.Err == OK: return reply.Value, nil
+    default: panic("Bad KVGet")
+    }
+}
+
+// Put with a version, old version will be rejected
+func (kv *RaftKV) KvPutV(key string, value string, version int) error {
+    // TODO
+    return nil
+}
+
 func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
     op := Op{}
     op.Kind = GET
@@ -369,6 +412,7 @@ func (kv *RaftKV) Kill() {
     kv.mu.Lock()
     defer kv.mu.Unlock()
 
+    kv.stopped = true
     kv.applier.stop()
 	kv.rf.Kill()
 }
@@ -376,6 +420,76 @@ func (kv *RaftKV) Kill() {
 // no need to lock
 func (kv *RaftKV) Raft() *raft.Raft {
     return kv.rf
+}
+
+func (kv *RaftKV) IsLeader() bool {
+    _, isLeader := kv.rf.GetState()
+    return isLeader
+}
+
+// @pre kv.mu.Locked
+func (kv *RaftKV) snapshot() {
+    DPrintf("DoSnapshot(me: %v, index: %v, term: %v, size: %v)", kv.me, kv.appliedIndex, kv.term, kv.persister.RaftStateSize())
+
+    kv.persister.SaveSnapshot(kv.toSnapshot())
+    kv.rf.OnSnapshot(kv.appliedIndex, kv.term)
+}
+
+// @pre kv.mu.Locked
+func (kv *RaftKV) loadSnapshot(data []byte) {
+    if data == nil || len(data) == 0 {
+        return
+    }
+
+    buffer := bytes.NewBuffer(data)
+    decoder := gob.NewDecoder(buffer)
+    decoder.Decode(&kv.appliedIndex)
+    decoder.Decode(&kv.term)
+    decoder.Decode(&kv.store)
+    decoder.Decode(&kv.dups)
+}
+
+// @pre kv.mu.Locked
+func (kv *RaftKV) toSnapshot() []byte {
+    buffer := bytes.Buffer{}
+    encoder := gob.NewEncoder(&buffer)
+    encoder.Encode(&kv.appliedIndex)
+    encoder.Encode(&kv.term)
+    encoder.Encode(&kv.store)
+    encoder.Encode(&kv.dups)
+    return buffer.Bytes()
+}
+
+// run in standalone goroutine
+func (kv *RaftKV) bgSnapshot() {
+    if kv.maxraftstate < 0 {
+        return
+    }
+
+    for {
+        time.Sleep(100 * time.Millisecond)
+
+        quit := kv.trySnapshot()
+        if quit {
+            break
+        }
+    }
+}
+
+// @returns quit or not
+func (kv *RaftKV) trySnapshot() bool {
+    kv.mu.Lock()
+    defer kv.mu.Unlock()
+    
+    if kv.stopped {
+        return true
+    }
+
+    if kv.persister.RaftStateSize() >= kv.maxraftstate {
+        kv.snapshot()
+    }
+
+    return false
 }
 
 //
@@ -399,9 +513,15 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+    kv.persister = persister
     kv.store = make(map[string]string)
     kv.dups = make(map[int64]int)
+    kv.loadSnapshot(kv.persister.ReadSnapshot())
     kv.applier = makeApplier(kv)
+
+    DPrintf("StartKV(me: %v, raftsize: %v)", me, persister.RaftStateSize())
+
+    go kv.bgSnapshot()
 
 	return kv
 }

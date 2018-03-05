@@ -87,3 +87,6 @@ Re election中总是有一个用例不过。old leader断网。然后再回来�
 由于appendEntries的响应会延迟，多次发送造成重复，因此，在onFollowerFailed中进行nextIndex回退时，会出现旧的nack。
 
 分布式系统中的消息处理函数必须是幂等的，因为消息会重复。
+
+# 其他问题
++ 论文里说，term开始时，需要send no op，这个no op是个啥？
