@@ -9,9 +9,19 @@ import "time"
 import "crypto/rand"
 import "math/big"
 
+// FIXME: cache leader
 type Clerk struct {
 	servers []*labrpc.ClientEnd
-	// Your data here.
+    id      int64
+    seq     int
+}
+
+func (ck *Clerk) nextSeq() int {
+    seq := ck.seq
+
+    ck.seq++
+
+    return seq
 }
 
 func nrand() int64 {
@@ -24,14 +34,14 @@ func nrand() int64 {
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
-	// Your code here.
+    ck.id = nrand()
 	return ck
 }
 
 func (ck *Clerk) Query(num int) Config {
 	args := &QueryArgs{}
-	// Your code here.
 	args.Num = num
+
 	for {
 		// try each known server.
 		for _, srv := range ck.servers {
@@ -47,8 +57,9 @@ func (ck *Clerk) Query(num int) Config {
 
 func (ck *Clerk) Join(servers map[int][]string) {
 	args := &JoinArgs{}
-	// Your code here.
 	args.Servers = servers
+    args.Client = ck.id
+    args.Seq = ck.nextSeq()
 
 	for {
 		// try each known server.
@@ -65,8 +76,9 @@ func (ck *Clerk) Join(servers map[int][]string) {
 
 func (ck *Clerk) Leave(gids []int) {
 	args := &LeaveArgs{}
-	// Your code here.
 	args.GIDs = gids
+    args.Client = ck.id
+    args.Seq = ck.nextSeq()
 
 	for {
 		// try each known server.
@@ -83,9 +95,10 @@ func (ck *Clerk) Leave(gids []int) {
 
 func (ck *Clerk) Move(shard int, gid int) {
 	args := &MoveArgs{}
-	// Your code here.
 	args.Shard = shard
 	args.GID = gid
+    args.Client = ck.id
+    args.Seq = ck.nextSeq()
 
 	for {
 		// try each known server.

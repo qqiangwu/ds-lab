@@ -22,6 +22,22 @@ type PutAppendReply struct {
 	Err         Err
 }
 
+type KV struct {
+    Key string
+    Value string
+}
+
+type MultiPutArgs struct {
+    Batch    []KV
+    Client   int64
+    Seq      int
+}
+
+type MultiPutReply struct {
+    WrongLeader bool
+    Err         Err
+}
+
 // won't change server's state, it's safe to execute multi-times.
 type GetArgs struct {
 	Key string

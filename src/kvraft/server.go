@@ -14,12 +14,14 @@ const (
     GET OpKind = iota
     PUT
     APPEND
+    MULTIPUT
 )
 
 func opFromString(op string) OpKind {
     switch op {
     case "Put": return PUT
     case "Append": return APPEND
+    case "MultiPut": return MULTIPUT
     default:
         panic("bad op")
     }
@@ -29,8 +31,7 @@ type Op struct {
     Kind      OpKind
     Client    int64
     Seq       int
-    Key       string
-    Value     string
+    Batch     []KV
 }
 
 type PendingCall struct {
@@ -222,6 +223,15 @@ func (kv *RaftKV) doDispatch(op *Op, reply interface{}) {
             panic("bad append reply @ doDispatch")
         }
 
+    case MULTIPUT:
+        if reply == nil {
+            kv.doMultiPut(op, &MultiPutReply{})
+        } else if mpReply, ok := reply.(*MultiPutReply); ok {
+            kv.doMultiPut(op, mpReply)
+        } else {
+            panic("bad multiput reply @ doDispatch")
+        }
+
     default:
         panic("invalid op")
     }
@@ -229,7 +239,7 @@ func (kv *RaftKV) doDispatch(op *Op, reply interface{}) {
 
 // @pre kv.mu.Locked
 func (kv *RaftKV) doGet(op *Op, reply *GetReply) {
-    val, exist := kv.store[op.Key]
+    val, exist := kv.store[op.Batch[0].Key]
     if exist {
         reply.Err = OK
         reply.Value = val
@@ -244,7 +254,21 @@ func (kv *RaftKV) doPut(op *Op, reply *PutAppendReply) {
     if !isDup {
         // FIFO on the same client, so won't see the future
         kv.dups[op.Client] = op.Seq
-        kv.store[op.Key] = op.Value
+        kv.store[op.Batch[0].Key] = op.Batch[0].Value
+    }
+
+    reply.Err = OK
+}
+
+// @pre kv.mu.Locked
+func (kv *RaftKV) doMultiPut(op *Op, reply *MultiPutReply) {
+    isDup := getOrDefault(kv.dups, op.Client, -1) >= op.Seq
+    if !isDup {
+        kv.dups[op.Client] = op.Seq
+
+        for _, e := range op.Batch {
+            kv.store[e.Key] = e.Value
+        }
     }
 
     reply.Err = OK
@@ -255,11 +279,11 @@ func (kv *RaftKV) doAppend(op *Op, reply *PutAppendReply) {
     isDup := getOrDefault(kv.dups, op.Client, -1) >= op.Seq
     if !isDup {
         kv.dups[op.Client] = op.Seq
-        v, ok := kv.store[op.Key]
+        v, ok := kv.store[op.Batch[0].Key]
         if ok {
-            kv.store[op.Key] = v + op.Value
+            kv.store[op.Batch[0].Key] = v + op.Batch[0].Value
         } else {
-            kv.store[op.Key] = op.Value
+            kv.store[op.Batch[0].Key] = op.Batch[0].Value
         }
     }
 
@@ -271,7 +295,7 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
     op.Kind = GET
     op.Client = -1
     op.Seq = -1
-    op.Key = args.Key
+    op.Batch = []KV{ {args.Key, ""} }
 
     kv.mu.Lock()
 
@@ -286,8 +310,6 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
         if !<-ch {
             reply.WrongLeader = true
         }
-
-        DPrintf("Wait(me: %v, term: %v, index: %v)", kv.me, term, index)
     }
 }
 
@@ -296,8 +318,7 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
     op.Kind = opFromString(args.Op)
     op.Client = args.Client
     op.Seq = args.Seq
-    op.Key = args.Key
-    op.Value = args.Value
+    op.Batch = []KV{ {args.Key, args.Value} }
 
     kv.mu.Lock()
 
@@ -309,13 +330,32 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
         ch := kv.applier.waitOn(index, term, reply)
         kv.mu.Unlock()
 
-        DPrintf("BeforeWait(me: %v, term: %v, index: %v)", kv.me, term, index)
+        if !<-ch {
+            reply.WrongLeader = true
+        }
+    }
+}
+
+func (kv *RaftKV) MultiPut(args *MultiPutArgs, reply *MultiPutReply) {
+    op := Op{}
+    op.Kind = MULTIPUT
+    op.Client = args.Client
+    op.Seq = args.Seq
+    op.Batch = args.Batch
+
+    kv.mu.Lock()
+
+    index, term, isLeader := kv.rf.Start(op)
+    if !isLeader {
+        reply.WrongLeader = true
+        kv.mu.Unlock()
+    } else {
+        ch := kv.applier.waitOn(index, term, reply)
+        kv.mu.Unlock()
 
         if !<-ch {
             reply.WrongLeader = true
         }
-
-        DPrintf("AfterWait(me: %v, term: %v, index: %v)", kv.me, term, index)
     }
 }
 
@@ -331,6 +371,11 @@ func (kv *RaftKV) Kill() {
 
     kv.applier.stop()
 	kv.rf.Kill()
+}
+
+// no need to lock
+func (kv *RaftKV) Raft() *raft.Raft {
+    return kv.rf
 }
 
 //
