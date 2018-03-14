@@ -19,12 +19,13 @@ type Err string
 
 // Put or Append
 type PutAppendArgs struct {
+	// You'll have to add definitions here.
 	Key   string
 	Value string
 	Op    string // "Put" or "Append"
-    Client int64
-    Seq    int
-    ConfigNum int
+	// You'll have to add definitions here.
+	// Field names must start with capital letters,
+	// otherwise RPC will break.
 }
 
 type PutAppendReply struct {
@@ -34,7 +35,7 @@ type PutAppendReply struct {
 
 type GetArgs struct {
 	Key string
-    ConfigNum int
+	// You'll have to add definitions here.
 }
 
 type GetReply struct {
