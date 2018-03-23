@@ -3,6 +3,8 @@ package raftkv
 const (
 	OK       = "OK"
 	ErrNoKey = "ErrNoKey"
+    ErrWrongLeader = "ErrWrongLeader"
+    ErrDup   = "ErrDup"
 )
 
 type Err string

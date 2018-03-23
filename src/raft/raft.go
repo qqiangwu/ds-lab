@@ -86,8 +86,13 @@ func (rf *Raft) SetCallback(onLeader func(int), onLoseLeader func()) {
     rf.mu.Lock()
     defer rf.mu.Unlock()
 
-    rf.onLeader = onLeader
-    rf.onLoseLeader = onLoseLeader
+    if onLeader != nil {
+        rf.onLeader = onLeader
+    }
+
+    if onLoseLeader != nil {
+        rf.onLoseLeader = onLoseLeader
+    }
 }
 
 // return currentTerm and whether this server
