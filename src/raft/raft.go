@@ -77,6 +77,17 @@ type Raft struct {
     handler     FsmHandler
     commitIndex int
     lastApplied int
+    onLeader     func(int)
+    onLoseLeader func()
+}
+
+// @pre mu.Locked
+func (rf *Raft) SetCallback(onLeader func(int), onLoseLeader func()) {
+    rf.mu.Lock()
+    defer rf.mu.Unlock()
+
+    rf.onLeader = onLeader
+    rf.onLoseLeader = onLoseLeader
 }
 
 // return currentTerm and whether this server
@@ -143,9 +154,6 @@ func (rf *Raft) applyNew() {
 
 // @pre rf.mu.Locked
 func (rf *Raft) apply(entry LogEntry) {
-    rf.mu.Unlock()
-    defer rf.mu.Lock()
-    
     _, ok := entry.Command.(NoOp)
     if !ok {
         msg := ApplyMsg{}
@@ -427,6 +435,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
     rf.handler.enter(rf)
     rf.loadSnapshot()
 	rf.readPersist(persister.ReadRaftState())
+    rf.onLeader = func(int){}
+    rf.onLoseLeader = func(){}
 
     DPrintf("RaftStart(me: %v, term: %v, lastApplied: %v)", rf.me, rf.currentTerm, rf.lastApplied)
 

@@ -90,3 +90,4 @@ Re election中总是有一个用例不过。old leader断网。然后再回来�
 
 # 其他问题
 + 论文里说，term开始时，需要send no op，这个no op是个啥？
++ 为Raft添加了onLeader与onLoseLeader的回调，并和apply做成了同步操作，从而，更加方便实现FSM

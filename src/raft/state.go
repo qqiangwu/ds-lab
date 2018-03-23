@@ -673,6 +673,7 @@ func (hd *LeaderHandler) enter(rf *Raft) {
     }
 
     hd.appender = makeAppender(hd)
+    hd.rf.onLeader(hd.term)
 }
 
 // @pre hd.appender != nil
@@ -680,6 +681,7 @@ func (hd *LeaderHandler) enter(rf *Raft) {
 func (hd *LeaderHandler) leave() {
     hd.appender.stop()
     // hd.appender = nil
+    hd.rf.onLoseLeader()
 }
 
 // @pre rf.mu.Locked
