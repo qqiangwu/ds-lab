@@ -12,16 +12,16 @@ import "math/big"
 // FIXME: cache leader
 type Clerk struct {
 	servers []*labrpc.ClientEnd
-    id      int64
-    seq     int
+	id      int64
+	seq     int
 }
 
 func (ck *Clerk) nextSeq() int {
-    seq := ck.seq
+	seq := ck.seq
 
-    ck.seq++
+	ck.seq++
 
-    return seq
+	return seq
 }
 
 func nrand() int64 {
@@ -34,7 +34,7 @@ func nrand() int64 {
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
-    ck.id = nrand()
+	ck.id = nrand()
 	return ck
 }
 
@@ -58,8 +58,8 @@ func (ck *Clerk) Query(num int) Config {
 func (ck *Clerk) Join(servers map[int][]string) {
 	args := &JoinArgs{}
 	args.Servers = servers
-    args.Client = ck.id
-    args.Seq = ck.nextSeq()
+	args.Client = ck.id
+	args.Seq = ck.nextSeq()
 
 	for {
 		// try each known server.
@@ -77,8 +77,8 @@ func (ck *Clerk) Join(servers map[int][]string) {
 func (ck *Clerk) Leave(gids []int) {
 	args := &LeaveArgs{}
 	args.GIDs = gids
-    args.Client = ck.id
-    args.Seq = ck.nextSeq()
+	args.Client = ck.id
+	args.Seq = ck.nextSeq()
 
 	for {
 		// try each known server.
@@ -97,8 +97,8 @@ func (ck *Clerk) Move(shard int, gid int) {
 	args := &MoveArgs{}
 	args.Shard = shard
 	args.GID = gid
-    args.Client = ck.id
-    args.Seq = ck.nextSeq()
+	args.Client = ck.id
+	args.Seq = ck.nextSeq()
 
 	for {
 		// try each known server.

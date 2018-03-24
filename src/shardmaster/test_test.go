@@ -9,7 +9,7 @@ import (
 import "fmt"
 
 func init() {
-    Debug = 1
+	Debug = 1
 }
 
 func check(t *testing.T, groups []int, ck *Clerk) {

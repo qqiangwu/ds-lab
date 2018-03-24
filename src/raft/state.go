@@ -673,6 +673,12 @@ func (hd *LeaderHandler) enter(rf *Raft) {
     }
 
     hd.appender = makeAppender(hd)
+
+    if rf.enableCB {
+        msg := ApplyMsg{}
+        msg.Type = GET_LEADER
+        rf.applier.Push(msg)
+    }
 }
 
 // @pre hd.appender != nil
@@ -680,6 +686,12 @@ func (hd *LeaderHandler) enter(rf *Raft) {
 func (hd *LeaderHandler) leave() {
     hd.appender.stop()
     // hd.appender = nil
+
+    if hd.rf.enableCB {
+        msg := ApplyMsg{}
+        msg.Type = LOSE_LEADER
+        hd.rf.applier.Push(msg)
+    }
 }
 
 // @pre rf.mu.Locked

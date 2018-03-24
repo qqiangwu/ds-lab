@@ -8,7 +8,7 @@ import "sync/atomic"
 import "math/rand"
 
 func init() {
-    Debug = 1
+	Debug = 1
 }
 
 func check(t *testing.T, ck *Clerk, key string, value string) {
@@ -21,7 +21,7 @@ func check(t *testing.T, ck *Clerk, key string, value string) {
 //
 // test static 2-way sharding, without shard movement.
 //
-func TestStaticShards(t *testing.T) {
+func TestStaticShards4A1(t *testing.T) {
 	fmt.Printf("Test: static shards ...\n")
 
 	cfg := make_config(t, 3, false, -1)
@@ -29,9 +29,11 @@ func TestStaticShards(t *testing.T) {
 
 	ck := cfg.makeClient()
 
+	fmt.Printf("Two group join\n")
 	cfg.join(0)
 	cfg.join(1)
 
+	fmt.Printf("Put 10 kv\n")
 	n := 10
 	ka := make([]string, n)
 	va := make([]string, n)
@@ -40,10 +42,12 @@ func TestStaticShards(t *testing.T) {
 		va[i] = randstring(20)
 		ck.Put(ka[i], va[i])
 	}
+
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
 	}
 
+	fmt.Printf("Shutdown group 1\n")
 	// make sure that the data really is sharded by
 	// shutting down one shard and checking that some
 	// Get()s don't succeed.
@@ -77,6 +81,7 @@ func TestStaticShards(t *testing.T) {
 	}
 
 	// bring the crashed shard/group back to life.
+	fmt.Printf("Bring group 1 back\n")
 	cfg.StartGroup(1)
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
@@ -85,7 +90,7 @@ func TestStaticShards(t *testing.T) {
 	fmt.Printf("  ... Passed\n")
 }
 
-func TestJoinLeave(t *testing.T) {
+func TestJoinLeave4A2(t *testing.T) {
 	fmt.Printf("Test: join then leave ...\n")
 
 	cfg := make_config(t, 3, false, -1)
@@ -93,6 +98,7 @@ func TestJoinLeave(t *testing.T) {
 
 	ck := cfg.makeClient()
 
+	fmt.Printf("Group 0 join\n")
 	cfg.join(0)
 
 	n := 10
@@ -107,6 +113,7 @@ func TestJoinLeave(t *testing.T) {
 		check(t, ck, ka[i], va[i])
 	}
 
+	fmt.Printf("Group 1 join\n")
 	cfg.join(1)
 
 	for i := 0; i < n; i++ {
@@ -116,6 +123,7 @@ func TestJoinLeave(t *testing.T) {
 		va[i] += x
 	}
 
+	fmt.Printf("Group 0 leave\n")
 	cfg.leave(0)
 
 	for i := 0; i < n; i++ {
@@ -131,6 +139,8 @@ func TestJoinLeave(t *testing.T) {
 	cfg.checklogs()
 	cfg.ShutdownGroup(0)
 
+	fmt.Printf("Group 0 shutdown\n")
+
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
 	}
@@ -138,7 +148,7 @@ func TestJoinLeave(t *testing.T) {
 	fmt.Printf("  ... Passed\n")
 }
 
-func TestSnapshot(t *testing.T) {
+func TestSnapshot4A3(t *testing.T) {
 	fmt.Printf("Test: snapshots, join, and leave ...\n")
 
 	cfg := make_config(t, 3, false, 1000)
@@ -146,6 +156,7 @@ func TestSnapshot(t *testing.T) {
 
 	ck := cfg.makeClient()
 
+	fmt.Printf("Group 0 join...\n")
 	cfg.join(0)
 
 	n := 30
@@ -160,6 +171,7 @@ func TestSnapshot(t *testing.T) {
 		check(t, ck, ka[i], va[i])
 	}
 
+	fmt.Printf("Group 1 and 2 join, group 0 leave...\n")
 	cfg.join(1)
 	cfg.join(2)
 	cfg.leave(0)
@@ -171,6 +183,7 @@ func TestSnapshot(t *testing.T) {
 		va[i] += x
 	}
 
+	fmt.Printf("Group 1 leave, group 0 join...\n")
 	cfg.leave(1)
 	cfg.join(0)
 
@@ -191,10 +204,12 @@ func TestSnapshot(t *testing.T) {
 
 	cfg.checklogs()
 
+	fmt.Printf("Shutdown all groups...\n")
 	cfg.ShutdownGroup(0)
 	cfg.ShutdownGroup(1)
 	cfg.ShutdownGroup(2)
 
+	fmt.Printf("Start all groups...\n")
 	cfg.StartGroup(0)
 	cfg.StartGroup(1)
 	cfg.StartGroup(2)
@@ -206,7 +221,7 @@ func TestSnapshot(t *testing.T) {
 	fmt.Printf("  ... Passed\n")
 }
 
-func TestMissChange(t *testing.T) {
+func TestMissChange4A4(t *testing.T) {
 	fmt.Printf("Test: servers miss configuration changes...\n")
 
 	cfg := make_config(t, 3, false, 1000)
@@ -292,7 +307,7 @@ func TestMissChange(t *testing.T) {
 	fmt.Printf("  ... Passed\n")
 }
 
-func TestConcurrent1(t *testing.T) {
+func TestConcurrent14B1(t *testing.T) {
 	fmt.Printf("Test: concurrent puts and configuration changes...\n")
 
 	cfg := make_config(t, 3, false, 100)
@@ -300,6 +315,7 @@ func TestConcurrent1(t *testing.T) {
 
 	ck := cfg.makeClient()
 
+	fmt.Printf("\nGroup 0 join --->\n")
 	cfg.join(0)
 
 	n := 10
@@ -330,29 +346,47 @@ func TestConcurrent1(t *testing.T) {
 	}
 
 	time.Sleep(150 * time.Millisecond)
+
+	fmt.Printf("\nGroup 1 join --->\n")
 	cfg.join(1)
 	time.Sleep(500 * time.Millisecond)
+
+	fmt.Printf("\nGroup 2 join --->\n")
 	cfg.join(2)
 	time.Sleep(500 * time.Millisecond)
+
+	fmt.Printf("\nGroup 0 leave --->\n")
 	cfg.leave(0)
 
+	fmt.Printf("\nGroup 0 shutdown --->\n")
 	cfg.ShutdownGroup(0)
 	time.Sleep(100 * time.Millisecond)
+
+	fmt.Printf("\nGroup 1 shutdown --->\n")
 	cfg.ShutdownGroup(1)
 	time.Sleep(100 * time.Millisecond)
+
+	fmt.Printf("\nGroup 2 shutdown -->\n")
 	cfg.ShutdownGroup(2)
 
+	fmt.Printf("\nGroup 2 leave --->\n")
 	cfg.leave(2)
 
 	time.Sleep(100 * time.Millisecond)
+	fmt.Printf("\nGroup 0,1,2 start --->\n")
 	cfg.StartGroup(0)
 	cfg.StartGroup(1)
 	cfg.StartGroup(2)
 
 	time.Sleep(100 * time.Millisecond)
+	fmt.Printf("\nGroup 0 join --->\n")
 	cfg.join(0)
+
+	fmt.Printf("\nGroup 1 leave --->\n")
 	cfg.leave(1)
+
 	time.Sleep(500 * time.Millisecond)
+	fmt.Printf("\nGroup 1 join --->\n")
 	cfg.join(1)
 
 	time.Sleep(1 * time.Second)
@@ -362,6 +396,7 @@ func TestConcurrent1(t *testing.T) {
 		<-ch
 	}
 
+	fmt.Printf("\nCheck all values --->\n")
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
 	}
@@ -373,7 +408,7 @@ func TestConcurrent1(t *testing.T) {
 // this tests the various sources from which a re-starting
 // group might need to fetch shard contents.
 //
-func TestConcurrent2(t *testing.T) {
+func TestConcurrent24B2(t *testing.T) {
 	fmt.Printf("Test: more concurrent puts and configuration changes...\n")
 
 	cfg := make_config(t, 3, false, -1)
@@ -444,7 +479,7 @@ func TestConcurrent2(t *testing.T) {
 	fmt.Printf("  ... Passed\n")
 }
 
-func TestUnreliable1(t *testing.T) {
+func TestUnreliable14C1(t *testing.T) {
 	fmt.Printf("Test: unreliable 1...\n")
 
 	cfg := make_config(t, 3, true, 100)
@@ -486,7 +521,7 @@ func TestUnreliable1(t *testing.T) {
 	fmt.Printf("  ... Passed\n")
 }
 
-func TestUnreliable2(t *testing.T) {
+func TestUnreliable24C2(t *testing.T) {
 	fmt.Printf("Test: unreliable 2...\n")
 
 	cfg := make_config(t, 3, true, 100)
@@ -553,7 +588,7 @@ func TestUnreliable2(t *testing.T) {
 // optional test to see whether servers are deleting
 // shards for which they are no longer responsible.
 //
-func TestChallenge1Delete(t *testing.T) {
+func TestChallenge1Delete4D1(t *testing.T) {
 	fmt.Printf("Test: shard deletion (challenge 1) ...\n")
 
 	// "1" means force snapshot after every log entry.
@@ -634,7 +669,7 @@ func TestChallenge1Delete(t *testing.T) {
 	fmt.Printf("  ... Passed\n")
 }
 
-func TestChallenge1Concurrent(t *testing.T) {
+func TestChallenge1Concurrent4D2(t *testing.T) {
 	fmt.Printf("Test: concurrent configuration change and restart (challenge 1)...\n")
 
 	cfg := make_config(t, 3, false, 300)
@@ -707,7 +742,7 @@ func TestChallenge1Concurrent(t *testing.T) {
 // shards that are not affected by a config change
 // while the config change is underway
 //
-func TestChallenge2Unaffected(t *testing.T) {
+func TestChallenge2Unaffected4E1(t *testing.T) {
 	fmt.Printf("Test: unaffected shard access (challenge 2) ...\n")
 
 	cfg := make_config(t, 3, true, 100)
@@ -777,7 +812,7 @@ func TestChallenge2Unaffected(t *testing.T) {
 // have been received as a part of a config migration when the entire migration
 // has not yet completed.
 //
-func TestChallenge2Partial(t *testing.T) {
+func TestChallenge2Partial4E2(t *testing.T) {
 	fmt.Printf("Test: partial migration shard access (challenge 2) ...\n")
 
 	cfg := make_config(t, 3, true, 100)

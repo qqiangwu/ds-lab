@@ -49,12 +49,22 @@ type FsmHandler interface {
 // committed, the peer should send an ApplyMsg to the service (or
 // tester) on the same server, via the applyCh passed to Make().
 //
+type EventType int
+const (
+    COMMAND EventType = iota
+    USE_SNAPSHOT
+    DO_SNAPSHOT
+    GET_LEADER
+    LOSE_LEADER
+)
+
 type ApplyMsg struct {
 	Index       int
     Term        int
 	Command     interface{}
 	UseSnapshot bool
 	Snapshot    []byte
+    Type        EventType
 }
 
 type NoOp struct {
@@ -68,7 +78,8 @@ type Raft struct {
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
-    applier   chan ApplyMsg
+    applier   *Applier
+    enableCB  bool
 
     // guarded by mu
     currentTerm int
@@ -77,6 +88,13 @@ type Raft struct {
     handler     FsmHandler
     commitIndex int
     lastApplied int
+}
+
+func (rf *Raft) EnableCB() {
+    rf.mu.Lock()
+    defer rf.mu.Unlock()
+
+    rf.enableCB = true
 }
 
 // return currentTerm and whether this server
@@ -143,9 +161,6 @@ func (rf *Raft) applyNew() {
 
 // @pre rf.mu.Locked
 func (rf *Raft) apply(entry LogEntry) {
-    rf.mu.Unlock()
-    defer rf.mu.Lock()
-    
     _, ok := entry.Command.(NoOp)
     if !ok {
         msg := ApplyMsg{}
@@ -153,7 +168,7 @@ func (rf *Raft) apply(entry LogEntry) {
         msg.Term = entry.Term
         msg.Command = entry.Command
 
-        rf.applier <- msg
+        rf.applier.Push(msg)
     }
 }
 
@@ -284,16 +299,13 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
         DPrintf("InstallSnapshot(me: %v, term: %v, from: %v, sIndex: %v, sTerm: %v)", 
             rf.me, rf.currentTerm, args.LeaderId, args.LastIncludedIndex, args.LastIncludedTerm)
 
-        rf.mu.Unlock()
-
         msg := ApplyMsg{}
         msg.Term = args.LastIncludedTerm
         msg.Index = args.LastIncludedIndex
         msg.UseSnapshot = true
         msg.Snapshot = args.Data
-        rf.applier <- msg
-
-        rf.mu.Lock()
+        msg.Type = USE_SNAPSHOT
+        rf.applier.Push(msg)
     }
 
     reply.Term = rf.currentTerm
@@ -316,6 +328,21 @@ func (rf *Raft) OnSnapshot(index int, term int) {
     rf.persist()
 
     DPrintf("OnSnapshot(me: %v, term: %v, sterm: %v, sindex: %v)", rf.me, rf.currentTerm, rf.log.LastTerm, rf.log.LastIndex)
+}
+
+// issue a snapshot
+func (rf *Raft) Snapshot() {
+    rf.mu.Lock()
+    defer rf.mu.Unlock()
+
+    if rf.lastApplied > rf.log.LastIndex {
+        msg := ApplyMsg{}
+        msg.Term = rf.currentTerm
+        msg.Index = rf.lastApplied
+        msg.Type = DO_SNAPSHOT
+
+        rf.applier.Push(msg)
+    }
 }
 
 //
@@ -390,6 +417,7 @@ func (rf *Raft) Kill() {
     rf.handler.leave()
     rf.handler = &KilledHandler{}
     rf.handler.enter(rf)
+    rf.applier.Stop()
 
     DPrintf("Kill(me: %v, term: %v, commitIndex: %v, applied: %v)",
         rf.me, rf.currentTerm, rf.commitIndex, rf.lastApplied)
@@ -422,7 +450,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
-    rf.applier = applyCh
+    rf.applier = makeApplier(applyCh)
     rf.handler = &FollowerHandler{}
     rf.handler.enter(rf)
     rf.loadSnapshot()

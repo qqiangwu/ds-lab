@@ -39,8 +39,8 @@ type Clerk struct {
 	sm       *shardmaster.Clerk
 	config   shardmaster.Config
 	make_end func(string) *labrpc.ClientEnd
-    id       int64
-    seq      int
+	id       int64
+	seq      int
 }
 
 //
@@ -56,22 +56,41 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck := new(Clerk)
 	ck.sm = shardmaster.MakeClerk(masters)
 	ck.make_end = make_end
-    ck.id = nrand()
+	ck.id = nrand()
 	return ck
 }
 
 func (ck *Clerk) nextSeq() int {
-    seq := ck.seq
-    ck.seq++
-    return seq
+	ck.seq++
+	return ck.seq
 }
 
-//
-// fetch the current value for a key.
-// returns "" if the key does not exist.
-// keeps trying forever in the face of all other errors.
-// You will have to modify this function.
-//
+func (ck *Clerk) SendShard(confNum int, target int, shard int, store ShardStore) {
+	args := SendArgs{}
+	args.ShardId = shard
+	args.Store = store
+	args.ConfNum = confNum
+
+	if ck.config.Num != confNum {
+		ck.config = ck.sm.Query(confNum)
+	}
+
+	for {
+		if servers, ok := ck.config.Groups[target]; ok {
+			for si := 0; si < len(servers); si++ {
+				srv := ck.make_end(servers[si])
+				var reply SendReply
+				ok := srv.Call("ShardKV.SendShard", &args, &reply)
+				if ok && !reply.WrongLeader {
+					return
+				}
+			}
+		}
+
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 func (ck *Clerk) Get(key string) string {
 	args := GetArgs{}
 	args.Key = key
@@ -80,7 +99,7 @@ func (ck *Clerk) Get(key string) string {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
 		if servers, ok := ck.config.Groups[gid]; ok {
-            args.ConfigNum = ck.config.Num
+			args.ConfNum = ck.config.Num
 
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
@@ -101,23 +120,19 @@ func (ck *Clerk) Get(key string) string {
 	return ""
 }
 
-//
-// shared by Put and Append.
-// You will have to modify this function.
-//
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args := PutAppendArgs{}
 	args.Key = key
 	args.Value = value
 	args.Op = op
-    args.Client = ck.id
-    args.Seq = ck.nextSeq()
+	args.Client = ck.id
+	args.Seq = ck.nextSeq()
 
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
 		if servers, ok := ck.config.Groups[gid]; ok {
-            args.ConfigNum = ck.config.Num
+			args.ConfNum = ck.config.Num
 
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
